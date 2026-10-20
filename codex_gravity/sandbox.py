@@ -6,9 +6,13 @@ and performs atomic merges only upon verified pass.
 
 from __future__ import annotations
 
+import atexit
 import asyncio
+from contextlib import asynccontextmanager
 import os
+import re
 import shutil
+import signal
 import time
 import uuid
 from enum import Enum
@@ -49,15 +53,35 @@ class StateLock:
 
     async def acquire_write_token(self, agent_id: str, state: LockState = LockState.CODING, timeout: float = 30.0) -> bool:
         start = time.time()
-        while time.time() - start < timeout:
+        while True:
             async with self._lock:
                 if self._active_writer is None or self._active_writer == agent_id:
                     self._active_writer = agent_id
                     self._state = state
                     self._lock_time = time.time()
                     return True
+            if time.time() - start >= timeout:
+                break
             await asyncio.sleep(0.05)
         raise TimeoutError(f"Failed to acquire write token for '{agent_id}' within {timeout}s; held by '{self._active_writer}'")
+
+    @asynccontextmanager
+    async def write_transaction(
+        self,
+        agent_id: str,
+        state: LockState = LockState.CODING,
+        timeout: float = 30.0,
+        next_state: Optional[LockState] = None,
+    ):
+        """
+        Transactional context manager ensuring the write lock is reliably released
+        even if an unhandled exception or cancellation occurs.
+        """
+        await self.acquire_write_token(agent_id, state=state, timeout=timeout)
+        try:
+            yield self
+        finally:
+            await self.release_write_token(agent_id, next_state=next_state)
 
     async def transition(self, new_state: LockState, agent_id: Optional[str] = None) -> None:
         async with self._lock:
@@ -72,10 +96,12 @@ class StateLock:
                 self._state = next_state or LockState.IDLE
                 self._lock_time = None
 
-    def can_write(self, agent_id: str) -> bool:
+    def can_write(self, agent_id: Optional[str] = None) -> bool:
         if self._state in (LockState.VERIFYING, LockState.MERGING, LockState.COMPLETED, LockState.FAILED):
             return False
-        return self._active_writer == agent_id or self._active_writer is None
+        if self._active_writer is not None:
+            return agent_id == self._active_writer
+        return True
 
 
 class CommandResult:
@@ -102,6 +128,18 @@ class CommandResult:
         return f"<CommandResult {status} in {self.duration_seconds:.2f}s>"
 
 
+_ACTIVE_SANDBOXES: set[SandboxManager] = set()
+
+
+def _cleanup_dangling_worktrees() -> None:
+    for sb in list(_ACTIVE_SANDBOXES):
+        if sb.is_created and sb.sandbox_dir.exists():
+            shutil.rmtree(sb.sandbox_dir, ignore_errors=True)
+
+
+atexit.register(_cleanup_dangling_worktrees)
+
+
 class SandboxManager:
     """
     Shadow Git Worktree Sandbox Manager.
@@ -116,14 +154,23 @@ class SandboxManager:
         base_branch: str = "main",
     ) -> None:
         self.repo_root = Path(repo_root or Path.cwd()).resolve()
-        self.task_id = task_id or f"task-{uuid.uuid4().hex[:8]}"
+        raw_task_id = task_id or f"task-{uuid.uuid4().hex[:8]}"
+        clean_task_id = re.sub(r"[^a-zA-Z0-9_-]", "", raw_task_id)
+        if not clean_task_id:
+            clean_task_id = f"task-{uuid.uuid4().hex[:8]}"
+        self.task_id = clean_task_id
         self.base_branch = base_branch
         self.branch_name = f"shadow/{self.task_id}"
-        self.sandbox_base = self.repo_root / ".shadow_sandbox"
-        self.sandbox_dir = self.sandbox_base / self.task_id
+        self.sandbox_base = (self.repo_root / ".shadow_sandbox").resolve()
+        self.sandbox_dir = (self.sandbox_base / self.task_id).resolve()
+        try:
+            self.sandbox_dir.relative_to(self.sandbox_base)
+        except ValueError:
+            raise ValueError(f"Invalid task_id '{raw_task_id}': escapes sandbox base")
         self.state_lock = StateLock()
         self.is_created = False
         self.is_merged = False
+        _ACTIVE_SANDBOXES.add(self)
 
     async def initialize(self) -> Path:
         """
@@ -132,7 +179,13 @@ class SandboxManager:
         if self.is_created:
             return self.sandbox_dir
 
-        if not (self.repo_root / ".git").exists():
+        # Discover repository root using git rev-parse --show-toplevel
+        top_res = await self._run_git(["rev-parse", "--show-toplevel"], cwd=self.repo_root)
+        if top_res.success and top_res.stdout.strip():
+            self.repo_root = Path(top_res.stdout.strip()).resolve()
+            self.sandbox_base = (self.repo_root / ".shadow_sandbox").resolve()
+            self.sandbox_dir = (self.sandbox_base / self.task_id).resolve()
+        elif not (self.repo_root / ".git").exists():
             raise RuntimeError(f"Repository root is not a git repository: {self.repo_root}")
 
         self.sandbox_base.mkdir(parents=True, exist_ok=True)
@@ -185,8 +238,9 @@ class SandboxManager:
         if self.state_lock.state in (LockState.VERIFYING, LockState.MERGING, LockState.COMPLETED, LockState.FAILED):
             raise PermissionError(f"Filesystem is read-only during {self.state_lock.state.value} phase")
 
-        if writer_id and not self.state_lock.can_write(writer_id):
-            raise PermissionError(f"Agent '{writer_id}' does not hold the active write lock")
+        if not self.state_lock.can_write(writer_id):
+            active = self.state_lock.active_writer
+            raise PermissionError(f"Agent '{writer_id}' cannot write: active write lock held by '{active}'")
 
         target_file = self.resolve_path(rel_path)
         target_file.parent.mkdir(parents=True, exist_ok=True)
@@ -232,14 +286,21 @@ class SandboxManager:
         env: Optional[dict[str, str]] = None,
     ) -> CommandResult:
         """
-        Executes a command inside the isolated sandbox directory.
-        Zero risk to the main repo.
+        Executes a command inside the isolated sandbox directory with process group isolation.
+        Zero risk to the main repo. Prevents zombie and orphan processes.
         """
         if not self.is_created:
             await self.initialize()
 
-        full_env = os.environ.copy()
-        full_env.setdefault("PYTHONDONTWRITEBYTECODE", "1")
+        full_env = {
+            "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+            "HOME": os.environ.get("HOME", "/tmp"),
+            "LANG": os.environ.get("LANG", "en_US.UTF-8"),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        for k, v in os.environ.items():
+            if k in ("USER", "SHELL", "TERM", "VIRTUAL_ENV", "PYTHONPATH") or k.startswith(("GIT_", "PYTEST_")):
+                full_env[k] = v
         if env:
             full_env.update(env)
 
@@ -251,6 +312,7 @@ class SandboxManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=full_env,
+                start_new_session=True,
             )
         else:
             process = await asyncio.create_subprocess_exec(
@@ -259,6 +321,7 @@ class SandboxManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=full_env,
+                start_new_session=True,
             )
 
         try:
@@ -271,17 +334,24 @@ class SandboxManager:
                 stderr=stderr_b.decode("utf-8", errors="replace"),
                 duration_seconds=duration,
             )
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, asyncio.CancelledError):
             try:
-                process.kill()
-            except ProcessLookupError:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+            try:
+                await asyncio.wait_for(process.wait(), timeout=2.0)
+            except Exception:
                 pass
             duration = time.time() - start
             return CommandResult(
                 command=command,
                 exit_code=-1,
                 stdout="",
-                stderr=f"Command timed out after {timeout} seconds",
+                stderr=f"Command timed out or cancelled after {timeout} seconds",
                 duration_seconds=duration,
             )
 
@@ -308,9 +378,21 @@ class SandboxManager:
         """
         Merges sandbox branch into target branch (main) atomically.
         Only called when verification passes 100%.
+        Guards main repo against dirty working copy corruption.
         """
         target = target_branch or self.base_branch
         await self.state_lock.transition(LockState.MERGING)
+
+        # Ensure repo_root has no dirty uncommitted changes
+        dirty_check = await self._run_git(["status", "--porcelain"], cwd=self.repo_root)
+        if dirty_check.stdout.strip():
+            dirty_lines = [l for l in dirty_check.stdout.splitlines() if ".shadow_sandbox" not in l]
+            if dirty_lines:
+                await self.state_lock.transition(LockState.FAILED)
+                raise RuntimeError(
+                    f"Cannot merge: Main repository at '{self.repo_root}' has dirty/uncommitted changes:\n"
+                    + "\n".join(dirty_lines[:5])
+                )
 
         # First commit any uncommitted changes in sandbox
         await self.commit_changes("chore: finalize verified sandbox changes")
@@ -326,6 +408,7 @@ class SandboxManager:
         merge_res = await self._run_git(merge_cmd, cwd=self.repo_root)
         if not merge_res.success:
             await self.state_lock.transition(LockState.FAILED)
+            await self._run_git(["merge", "--abort"], cwd=self.repo_root)
             raise RuntimeError(f"Failed to merge {self.branch_name} into {target}: {merge_res.stderr}")
 
         self.is_merged = True
@@ -336,21 +419,26 @@ class SandboxManager:
         """
         Removes the worktree and cleans up the shadow branch.
         """
+        _ACTIVE_SANDBOXES.discard(self)
         if not self.is_created and not self.sandbox_dir.exists():
             return
 
         # 1. Remove worktree via git
         await self._run_git(["worktree", "remove", "--force", str(self.sandbox_dir)], cwd=self.repo_root)
 
-        # 2. Remove leftover directory if git didn't remove it
+        # 2. Remove leftover directory if git didn't remove it (safety check inside sandbox_base)
         if self.sandbox_dir.exists():
-            shutil.rmtree(self.sandbox_dir, ignore_errors=True)
+            try:
+                self.sandbox_dir.relative_to(self.sandbox_base)
+                shutil.rmtree(self.sandbox_dir, ignore_errors=True)
+            except ValueError:
+                pass
 
         # 3. Prune worktrees in git
         await self._run_git(["worktree", "prune"], cwd=self.repo_root)
 
-        # 4. Delete shadow branch if requested
-        if delete_branch:
+        # 4. Delete shadow branch if requested (preserve if merge failed for inspection)
+        if delete_branch and (self.is_merged or self.state_lock.state != LockState.FAILED):
             await self._run_git(["branch", "-D", self.branch_name], cwd=self.repo_root)
 
         self.is_created = False

@@ -7,6 +7,7 @@ Coordinates speculative drafting, transactional state locks, token arbitrage led
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from enum import Enum
 from pathlib import Path
@@ -369,9 +370,14 @@ class SmartRouter:
                         for cf in css_files:
                             current_css = await sandbox.read_file(cf)
                             await sandbox.write_file(cf, current_css + fix_rule, writer_id="codex")
-                    else:
+                    elif target_file.endswith((".css", ".scss", ".style", ".html")):
                         current = await sandbox.read_file(target_file)
                         await sandbox.write_file(target_file, current + fix_rule, writer_id="codex")
+                    else:
+                        # Safeguard: Never write CSS syntax directly into Python or TS files!
+                        css_target = "styles.css"
+                        current_css = await sandbox.read_file(css_target) if sandbox.file_exists(css_target) else ""
+                        await sandbox.write_file(css_target, current_css + fix_rule, writer_id="codex")
 
                     await self.event_bus.send_dialogue(
                         sender="codex",
@@ -409,14 +415,30 @@ class SmartRouter:
     def _deepcoder_fallback_synthesis(skeleton: DraftSkeleton) -> str:
         """
         Antigravity DeepCoder fallback synthesizer when Codex is unavailable.
+        Dynamically preserves caller indentation level across class methods and blocks.
         """
         is_python = skeleton.language.lower() in ("python", "py")
         code = skeleton.skeleton_code
         for anchor in skeleton.anchors:
-            if anchor.placeholder in code:
-                if is_python:
-                    replacement = "    # DeepCoder fallback logic\n    return OperationResponse(success=True, data={'fallback': True, 'query': request.query})"
+            if not anchor.placeholder:
+                continue
+            lines = code.splitlines(keepends=True)
+            new_lines = []
+            for line in lines:
+                if anchor.placeholder in line:
+                    indent = re.match(r"^(\s*)", line).group(1)
+                    if is_python:
+                        repl_lines = [
+                            f"{indent}# DeepCoder fallback logic\n",
+                            f"{indent}return OperationResponse(success=True, data={{'fallback': True, 'query': request.query}})\n",
+                        ]
+                    else:
+                        repl_lines = [
+                            f"{indent}// DeepCoder fallback logic\n",
+                            f"{indent}return {{ success: true, data: {{ fallback: true, query: request.query }} }};\n",
+                        ]
+                    new_lines.append("".join(repl_lines))
                 else:
-                    replacement = "  // DeepCoder fallback logic\n  return { success: true, data: { fallback: true, query: request.query } };"
-                code = code.replace(anchor.placeholder, replacement)
+                    new_lines.append(line)
+            code = "".join(new_lines)
         return code

@@ -211,9 +211,11 @@ class SpeculativeDraftingPipeline:
         """
         Stitches Codex patches into the skeleton using AST anchors, avoiding line number drift.
         Preserves indentation properly without mangling multi-line blocks.
+        Handles mixed tabs/spaces, multiple repeated placeholders, and inline targets.
         """
         patch_map = {p.anchor_id: p.replacement_code for p in patches}
         code = skeleton.skeleton_code
+        uses_tabs = "\t" in code
 
         for anchor in skeleton.anchors:
             if anchor.anchor_id not in patch_map:
@@ -227,23 +229,43 @@ class SpeculativeDraftingPipeline:
             if not target_pattern:
                 continue
 
-            # Dedent the replacement block to compute relative indentation cleanly
             dedented_replacement = textwrap.dedent(replacement).strip()
 
             lines = code.splitlines(keepends=True)
             new_lines = []
+            replaced_for_this_anchor = False
+
             for line in lines:
-                if target_pattern in line:
+                if not replaced_for_this_anchor and target_pattern in line:
+                    replaced_for_this_anchor = True
+                    line_stripped = line.strip()
                     indent = re.match(r"^(\s*)", line).group(1)
-                    indented_repl_lines = []
-                    for r_line in dedented_replacement.splitlines():
-                        if r_line.strip():
-                            indented_repl_lines.append(f"{indent}{r_line}\n")
+                    line_uses_tabs = "\t" in indent or (not indent and uses_tabs)
+
+                    if line_stripped == target_pattern.strip():
+                        indented_repl_lines = []
+                        for r_line in dedented_replacement.splitlines():
+                            if r_line.strip():
+                                if line_uses_tabs:
+                                    r_line_clean = r_line.replace("    ", "\t")
+                                    indented_repl_lines.append(f"{indent}{r_line_clean}\n")
+                                else:
+                                    r_line_clean = r_line.replace("\t", "    ")
+                                    indented_repl_lines.append(f"{indent}{r_line_clean}\n")
+                            else:
+                                indented_repl_lines.append("\n")
+                        new_lines.append("".join(indented_repl_lines))
+                    else:
+                        if "\n" not in dedented_replacement:
+                            new_lines.append(line.replace(target_pattern, dedented_replacement))
                         else:
-                            indented_repl_lines.append("\n")
-                    new_lines.append("".join(indented_repl_lines))
+                            repl_lines = dedented_replacement.splitlines()
+                            first = line.replace(target_pattern, repl_lines[0])
+                            rest = "".join(f"{indent}{r}\n" for r in repl_lines[1:])
+                            new_lines.append(first + rest)
                 else:
                     new_lines.append(line)
+
             code = "".join(new_lines)
 
         return code

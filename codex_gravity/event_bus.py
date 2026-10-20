@@ -53,9 +53,10 @@ class EventBus:
     Central Asynchronous Event Bus for agent backchannel and walkie-talkie logs.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, max_history: int = 1000) -> None:
         self._subscribers: dict[str, list[tuple[str, EventHandler]]] = {}
         self._history: list[Event] = []
+        self._max_history = max(10, max_history)
         self._lock = asyncio.Lock()
         self._stream_queues: list[asyncio.Queue[Event]] = []
 
@@ -89,16 +90,26 @@ class EventBus:
     async def publish(self, event: Event) -> None:
         """
         Publishes an event to matching subscribers and streams.
+        Enforces bounded history and concurrent non-blocking handler dispatch.
         """
         async with self._lock:
             self._history.append(event)
+            if len(self._history) > self._max_history:
+                self._history = self._history[-self._max_history:]
 
         # Distribute to live stream queues
+        dead_queues = []
         for q in list(self._stream_queues):
             try:
                 q.put_nowait(event)
             except asyncio.QueueFull:
                 pass
+            except Exception:
+                dead_queues.append(q)
+
+        for dq in dead_queues:
+            if dq in self._stream_queues:
+                self._stream_queues.remove(dq)
 
         # Collect relevant handlers
         handlers_to_run: list[EventHandler] = []
@@ -109,15 +120,18 @@ class EventBus:
         if "*" in self._subscribers:
             handlers_to_run.extend([h[1] for h in self._subscribers["*"]])
 
-        # Execute handlers
+        # Execute synchronous and asynchronous handlers
+        async_coros = []
         for handler in handlers_to_run:
             try:
                 res = handler(event)
                 if asyncio.iscoroutine(res):
-                    await res
-            except Exception as e:
-                # Log error or record system event
+                    async_coros.append(res)
+            except Exception:
                 pass
+
+        if async_coros:
+            await asyncio.gather(*async_coros, return_exceptions=True)
 
     async def send_dialogue(
         self,

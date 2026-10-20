@@ -12,6 +12,7 @@ import json
 import mimetypes
 import os
 import re
+import signal
 import urllib.parse
 from pathlib import Path
 from typing import Any, Optional
@@ -21,15 +22,21 @@ from mcp.server.mcpserver import MCPServer
 from codex_gravity.verifier import RootCauseAnalyzer, VisualRegressionInspector
 
 
-def _resolve_local_path(path_or_uri: str) -> Path:
+def _resolve_local_path(path_or_uri: str) -> Optional[Path]:
     """
     Resolves local paths and file:// URIs into canonical Path instances.
+    Safely rejects raw multiline strings and excessively long inputs to prevent OSError/DoS.
     """
     clean = path_or_uri.strip()
+    if "\n" in clean or len(clean) > 4096 or "\x00" in clean:
+        return None
     if clean.startswith("file:"):
         parsed = urllib.parse.urlparse(clean)
         clean = urllib.parse.unquote(parsed.path)
-    return Path(clean).resolve()
+    try:
+        return Path(clean).resolve()
+    except (ValueError, OSError):
+        return None
 
 
 def create_mcp_server(name: str = "codex-gravity-mcp", version: str = "0.1.0") -> MCPServer:
@@ -49,7 +56,7 @@ def create_mcp_server(name: str = "codex-gravity-mcp", version: str = "0.1.0") -
         completely avoiding base64 payload overflow on large video/audio files.
         """
         p = _resolve_local_path(file_path)
-        if not p.exists():
+        if not p or not p.exists():
             return json.dumps({
                 "error": f"File does not exist: {file_path}",
                 "status": "failed",
@@ -101,7 +108,7 @@ def create_mcp_server(name: str = "codex-gravity-mcp", version: str = "0.1.0") -
         distilled_content = ""
         ast_anchor = ""
 
-        if p.exists() and p.is_file():
+        if p and p.exists() and p.is_file():
             text = p.read_text(encoding="utf-8", errors="replace")
             lines = text.splitlines()
             raw_lines = len(lines)
@@ -125,7 +132,7 @@ def create_mcp_server(name: str = "codex-gravity-mcp", version: str = "0.1.0") -
                 distilled_content = "\n".join(lines[-10:])
                 ast_anchor = f"{p.name}:tail"
 
-        elif p.exists() and p.is_dir():
+        elif p and p.exists() and p.is_dir():
             best_file = None
             best_line_idx = -1
             best_score = 0
@@ -205,21 +212,42 @@ def create_mcp_server(name: str = "codex-gravity-mcp", version: str = "0.1.0") -
         test_command: str,
         ui_url: Optional[str] = None,
         cwd: Optional[str] = None,
+        timeout: float = 60.0,
     ) -> str:
         """
         Executes terminal verification and checks responsive viewports (Mobile, Tablet, Desktop).
+        Uses process group isolation and timeout protection to prevent zombie processes.
         """
-        # Run terminal command in specified or current working directory
-        process = await asyncio.create_subprocess_shell(
-            test_command,
-            cwd=cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout_b, stderr_b = await process.communicate()
-        stdout = stdout_b.decode("utf-8", errors="replace")
-        stderr = stderr_b.decode("utf-8", errors="replace")
-        passed = process.returncode == 0
+        # Run terminal command in specified or current working directory with process group
+        try:
+            process = await asyncio.create_subprocess_shell(
+                test_command,
+                cwd=cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+            stdout_b, stderr_b = await asyncio.wait_for(process.communicate(), timeout=timeout)
+            stdout = stdout_b.decode("utf-8", errors="replace")
+            stderr = stderr_b.decode("utf-8", errors="replace")
+            returncode = process.returncode
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+            try:
+                await asyncio.wait_for(process.wait(), timeout=2.0)
+            except Exception:
+                pass
+            stdout = ""
+            stderr = f"Command execution timed out after {timeout} seconds"
+            returncode = -1
+
+        passed = returncode == 0
 
         diagnostics = None
         if not passed:
@@ -234,7 +262,7 @@ def create_mcp_server(name: str = "codex-gravity-mcp", version: str = "0.1.0") -
 
         result = {
             "command": test_command,
-            "exit_code": process.returncode,
+            "exit_code": returncode,
             "passed": passed,
             "stdout_tail": "\n".join(stdout.splitlines()[-10:]),
             "stderr_tail": "\n".join(stderr.splitlines()[-10:]),

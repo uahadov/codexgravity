@@ -8,11 +8,12 @@ and coordinates autonomous self-healing loops between Antigravity and Codex.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any, Callable, Coroutine, Optional, Union
 from pydantic import BaseModel, Field
 
 from codex_gravity.event_bus import Event, EventBus, EventType
-from codex_gravity.sandbox import CommandResult, SandboxManager
+from codex_gravity.sandbox import CommandResult, LockState, SandboxManager
 
 
 class TestExecutionResult(BaseModel):
@@ -80,14 +81,15 @@ class RootCauseAnalyzer:
 
         # 1. Check for Pytest test failure frame
         # e.g.: test_calc.py:4: in test_calc\n>       assert add(2, 2) == 4\nE       AssertionError: assert -2 == 4
-        pytest_frame = re.search(r'([\w/.-]+\.py):(\d+): in (\w+)\n(?:[^\n]*\n)*?>\s*(.+)', combined)
+        pytest_frame = re.search(r'([\w/.-]+\.py):(\d+): in ([^\n]+)\n(?:[^\n]*\n)*?>\s*(.+)', combined)
         if pytest_frame:
             failed_file = pytest_frame.group(1)
             failed_line = int(pytest_frame.group(2))
             target_snippet = pytest_frame.group(4).strip()
 
         # 2. Check for standard Python tracebacks (search all frames and pick innermost user frame)
-        tb_matches = list(re.finditer(r'File "([^"]+)", line (\d+), in (\w+)\n\s*(.+)', combined))
+        # Handles <module>, <lambda>, <listcomp>, methods, etc.
+        tb_matches = list(re.finditer(r'File "([^"]+)", line (\d+), in ([^\n]+)\n\s*(.+)', combined))
         if tb_matches:
             user_frames = [
                 m for m in tb_matches
@@ -143,6 +145,11 @@ class RootCauseAnalyzer:
                 error_message = last_err.group(2).strip()
 
         has_error = bool(failed_file or tb_matches or pytest_failed or err_matches or jest_match or ts_match)
+        if not has_error and combined.strip() and any(k in combined.lower() for k in ("fail", "error", "exception", "traceback")):
+            has_error = True
+            error_type = "ExecutionFailure"
+            error_message = combined.strip().splitlines()[-1]
+
         if has_error:
             recommended_fix = cls._derive_fix(error_type, error_message, target_snippet)
 
@@ -225,6 +232,7 @@ class VisualRegressionInspector:
         Default visual layout heuristic inspector.
         Detects responsiveness and identifies overflow regressions.
         """
+        Path("/tmp/screenshots").mkdir(parents=True, exist_ok=True)
         # Detect mobile overflow simulations in test environments
         if "overflow" in ui_url.lower() and name == "mobile":
             return ViewportCheckResult(
@@ -364,7 +372,12 @@ class VerificationEngine:
                         message=f"Test failed with {res.diagnostics.error_type if res.diagnostics else 'Error'}: {res.diagnostics.error_message if res.diagnostics else ''}. Requesting targeted patch.",
                     )
 
-                # Execute patch callback
-                await patch_callback(res.diagnostics or DiagnosticReport(has_error=True), res.viewport_results)
+                # Execute patch callback under HEALING state to avoid read-only lock collisions
+                prev_state = sandbox.state_lock.state
+                await sandbox.state_lock.transition(LockState.HEALING)
+                try:
+                    await patch_callback(res.diagnostics or DiagnosticReport(has_error=True), res.viewport_results)
+                finally:
+                    await sandbox.state_lock.transition(prev_state)
 
         return False, history
