@@ -157,3 +157,24 @@ async def test_call_antigravity_verifier_tool():
     assert data["passed"] is True
     assert data["exit_code"] == 0
     assert "verifier tool ok" in data["stdout_tail"]
+
+
+def test_mcp_dashboard_and_health_routes():
+    from starlette.testclient import TestClient
+    server = create_mcp_server()
+    client = TestClient(server.streamable_http_app())
+
+    # GET / returns dashboard HTML
+    res_home = client.get("/")
+    assert res_home.status_code == 200
+    assert "Codex-Gravity MCP Server" in res_home.text
+    assert "antigravity_inspect_media" in res_home.text
+
+    # GET /health returns JSON status
+    res_health = client.get("/health")
+    assert res_health.status_code == 200
+    data = res_health.json()
+    assert data["status"] == "healthy"
+    assert data["server"] == "codex-gravity-mcp"
+    assert len(data["active_tools"]) == 6
+

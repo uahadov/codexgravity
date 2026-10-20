@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from mcp.server.mcpserver import MCPServer
+from starlette.responses import HTMLResponse, JSONResponse
 
 from codex_gravity.verifier import RootCauseAnalyzer, VisualRegressionInspector
 
@@ -39,11 +40,220 @@ def _resolve_local_path(path_or_uri: str) -> Optional[Path]:
         return None
 
 
+DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="az">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Codex-Gravity MCP Dashboard</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --card-bg: #161b22;
+      --border: #30363d;
+      --accent: #58a6ff;
+      --green: #3fb950;
+      --text: #c9d1d9;
+      --text-white: #f0f6fc;
+      --badge-bg: #21262d;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      padding: 32px 16px;
+      line-height: 1.5;
+    }
+    .container { max-width: 960px; margin: 0 auto; }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 24px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 24px;
+    }
+    .title-area h1 { font-size: 26px; color: var(--text-white); display: flex; align-items: center; gap: 10px; }
+    .title-area p { color: #8b949e; margin-top: 4px; font-size: 14px; }
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(63, 185, 80, 0.15);
+      color: var(--green);
+      padding: 6px 14px;
+      border-radius: 20px;
+      border: 1px solid rgba(63, 185, 80, 0.4);
+      font-weight: 600;
+      font-size: 13px;
+    }
+    .pulse {
+      width: 10px; height: 10px; border-radius: 50%; background: var(--green);
+      box-shadow: 0 0 10px var(--green);
+      animation: pulse-anim 1.5s infinite;
+    }
+    @keyframes pulse-anim { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(1.2); } }
+    .alert-box {
+      background: rgba(88, 166, 255, 0.08);
+      border-left: 4px solid var(--accent);
+      padding: 16px 20px;
+      border-radius: 6px;
+      margin-bottom: 28px;
+      font-size: 14px;
+    }
+    .alert-box strong { color: var(--text-white); }
+    .alert-box code { background: #21262d; padding: 2px 6px; border-radius: 4px; color: #ff7b72; font-size: 13px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 32px; }
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 20px;
+      transition: transform 0.2s, border-color 0.2s;
+    }
+    .card:hover { transform: translateY(-2px); border-color: var(--accent); }
+    .card-title { color: var(--text-white); font-size: 16px; font-weight: 600; margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; }
+    .tag { font-size: 11px; padding: 2px 8px; border-radius: 12px; background: var(--badge-bg); color: var(--accent); border: 1px solid var(--border); }
+    .card-desc { font-size: 13px; color: #8b949e; margin-bottom: 12px; }
+    .code-box {
+      background: #0d1117;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 16px;
+      font-family: monospace;
+      font-size: 13px;
+      color: #79c0ff;
+      overflow-x: auto;
+      margin-bottom: 24px;
+      position: relative;
+    }
+    .section-title { font-size: 18px; color: var(--text-white); margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+    .copy-btn {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      background: #21262d;
+      color: var(--text-white);
+      border: 1px solid var(--border);
+      padding: 4px 10px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    .copy-btn:hover { background: #30363d; }
+    .btn {
+      background: #238636;
+      color: #fff;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 500;
+      font-size: 13px;
+    }
+    .btn:hover { background: #2ea043; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="title-area">
+        <h1>⚡ Codex-Gravity MCP Server</h1>
+        <p>OpenAI Codex & Google Antigravity (Gemini 3.8 Flash) Hybrid Architecture</p>
+      </div>
+      <div class="status-badge">
+        <span class="pulse"></span>
+        <span>ONLINE (Port 8000)</span>
+      </div>
+    </div>
+
+    <div class="alert-box">
+      <strong>ℹ️ Niyə brauzerdə <code>/mcp</code> ünvanında "Missing session ID" görürdünüz?</strong><br>
+      Çünki <code>http://127.0.0.1:8000/mcp</code> insan üçün veb səhifəsi deyil, AI Modelləri (OpenAI Codex, Claude, Antigravity) üçün rəsmi <strong>JSON-RPC 2.0 Streamable HTTP</strong> qapısıdır. LLM-lər bu ünvana qoşulduqda avtomatik sessiya başladır. Bu ana səhifə (<code>/</code>) isə sizin üçün monitorinq və test lövhəsidir.
+    </div>
+
+    <h2 class="section-title">🛠️ Aktiv MCP Alətləri (6 Ədəd)</h2>
+    <div class="grid">
+      <div class="card">
+        <div class="card-title">antigravity_inspect_media <span class="tag">Gemini Flash</span></div>
+        <div class="card-desc">Video və audio faylların Zero-Copy üsulu ilə saniyələr içində multimodal təhlili və vaxt kodlu hadisə xülasəsi.</div>
+      </div>
+      <div class="card">
+        <div class="card-title">antigravity_distill_context <span class="tag">97.9% Qənaət</span></div>
+        <div class="card-desc">100k+ sətirlik böyük repozitori və ya test loqlarını AST kontekstinə sıxaraq Codex-ə ötürür.</div>
+      </div>
+      <div class="card">
+        <div class="card-title">antigravity_verify_and_screenshot <span class="tag">Self-Healing</span></div>
+        <div class="card-desc">Terminal testlərini icra edir, xəta kökünü (root cause) tapır və mobil/planşet/desktop vizual UI yoxlaması aparır.</div>
+      </div>
+      <div class="card">
+        <div class="card-title">call_antigravity_multimodal <span class="tag">Simmetrik</span></div>
+        <div class="card-desc">Codex-in birbaşa Antigravity-dən media və böyük kontekst köməyi tələb etməsi üçün qapı.</div>
+      </div>
+      <div class="card">
+        <div class="card-title">call_antigravity_verifier <span class="tag">Simmetrik</span></div>
+        <div class="card-desc">Codex-in yazdığı kodların sandbox daxilində yoxlanması üçün simmetrik sorğu qapısı.</div>
+      </div>
+      <div class="card">
+        <div class="card-title">call_codex_architect <span class="tag">Codex Core</span></div>
+        <div class="card-desc">Antigravity-nin OpenAI Codex-dən dərin alqoritmik biznes məntiqi və refaktorinq tələb etməsi üçün qapı.</div>
+      </div>
+    </div>
+
+    <h2 class="section-title">⚙️ Codex və Digər Alətlərə Qoşulma Konfiqurasiyası</h2>
+    <p style="font-size: 13px; color: #8b949e; margin-bottom: 8px;">Codex / Claude / Antigravity <code>mcpServers</code> konfiqurasiyasına bunu əlavə edin:</p>
+    <div class="code-box">
+      <button class="copy-btn" onclick="navigator.clipboard.writeText(this.nextElementSibling.innerText); this.innerText='Kopyalandı!'; setTimeout(()=>this.innerText='Kopyala', 2000)">Kopyala</button>
+      <pre>{
+  "mcpServers": {
+    "codex-gravity-http": {
+      "url": "http://127.0.0.1:8000/mcp"
+    },
+    "codex-gravity-stdio": {
+      "command": "/home/ua/Desktop/codex-gravity/.venv/bin/codex-gravity-mcp",
+      "args": ["--transport", "stdio"]
+    }
+  }
+}</pre>
+    </div>
+
+    <div style="display: flex; gap: 12px; align-items: center;">
+      <button class="btn" onclick="fetch('/health').then(r=>r.json()).then(d=>alert('Server Status: ' + JSON.stringify(d, null, 2)))">Canlı Server Statusunu Yoxla (/health)</button>
+      <span style="font-size: 13px; color: #8b949e;">Endpoint: <code>http://127.0.0.1:8000/mcp</code></span>
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+
 def create_mcp_server(name: str = "codex-gravity-mcp", version: str = "0.1.0") -> MCPServer:
     """
     Creates and configures the official Codex-Gravity MCP server with standard tools.
     """
     server = MCPServer(name, version=version)
+
+    @server.custom_route("/", methods=["GET"])
+    async def index(request: Any) -> Any:
+        return HTMLResponse(DASHBOARD_HTML)
+
+    @server.custom_route("/health", methods=["GET"])
+    async def health(request: Any) -> Any:
+        return JSONResponse({
+            "status": "healthy",
+            "server": "codex-gravity-mcp",
+            "version": version,
+            "mcp_endpoint": "/mcp",
+            "active_tools": [
+                "antigravity_inspect_media",
+                "antigravity_distill_context",
+                "antigravity_verify_and_screenshot",
+                "call_antigravity_verifier",
+                "call_codex_architect",
+                "call_antigravity_multimodal",
+            ],
+        })
 
     @server.tool(
         name="antigravity_inspect_media",
