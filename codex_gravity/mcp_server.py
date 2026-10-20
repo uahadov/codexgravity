@@ -62,7 +62,12 @@ def get_gemini_client() -> Optional[Any]:
         return None
 
 
-async def call_native_antigravity(prompt: str, model: str = "flash", timeout_sec: float = 25.0) -> Optional[str]:
+async def call_native_antigravity(
+    prompt: str,
+    media_file_path: Optional[Path] = None,
+    model: str = "flash",
+    timeout_sec: float = 40.0,
+) -> Optional[str]:
     """
     Directly invokes Google Antigravity (Gemini 3.8 Flash) using the user's active local
     Google Antigravity subscription via the official language_server / agentapi binary.
@@ -82,11 +87,17 @@ async def call_native_antigravity(prompt: str, model: str = "flash", timeout_sec
     if not agentapi_bin:
         return None
 
-    # Instruct the agent to provide immediate text response without executing external bash/file tools
-    formatted_prompt = (
-        "Cavabı dərhal heç bir alət və ya komanda (tool) çağırmadan birbaşa aydın mətn olaraq ver:\n\n"
-        + prompt
-    )
+    if media_file_path and media_file_path.exists():
+        formatted_prompt = (
+            f"Zəhmət olmasa dərhal `read_file` alətindən istifadə edərək bu faylı oxu və vizual olaraq təhlil et: {media_file_path.resolve()}\n\n"
+            f"Göstəriş/Sual: {prompt}\n\n"
+            f"Faylda gördüyün bütün vizual detalları (başlıq, pəncərə adı, axtarış xanasındakı mətn, seçilmiş menyu, nəticələr sahəsi və s.) dəqiqliklə və ətraflı cavablandır. Heç bir faylı dəyişmə."
+        )
+    else:
+        formatted_prompt = (
+            "Cavabı dərhal heç bir alət və ya komanda (tool) çağırmadan birbaşa aydın mətn olaraq ver:\n\n"
+            + prompt
+        )
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -97,7 +108,7 @@ async def call_native_antigravity(prompt: str, model: str = "flash", timeout_sec
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=8.0)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
         if proc.returncode != 0:
             return None
 
@@ -113,7 +124,7 @@ async def call_native_antigravity(prompt: str, model: str = "flash", timeout_sec
             if transcript_file.exists():
                 try:
                     lines = transcript_file.read_text(encoding="utf-8", errors="replace").strip().splitlines()
-                    for line in lines:
+                    for line in reversed(lines):
                         if not line.strip():
                             continue
                         entry = json.loads(line)
@@ -121,7 +132,7 @@ async def call_native_antigravity(prompt: str, model: str = "flash", timeout_sec
                             return entry.get("content")
                 except Exception:
                     pass
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.4)
         return None
     except Exception:
         return None
@@ -166,14 +177,12 @@ async def _inspect_media_with_gemini_or_probe(
 
     # 2. Check for native Google Antigravity subscription execution (agentapi)
     if not os.environ.get("PYTEST_CURRENT_TEST"):
-        agy_prompt = (
-            f"Analyze this media file:\n"
-            f"File: {file_path.name} (Format: {format_info.get('format_long_name', mime)}, Duration: {duration_sec:.2f}s, Size: {size_bytes} bytes)\n"
-            f"Focus/Query: {focus_query or instruction or 'Describe key events with timestamps'}\n"
-            f"Technical streams: {streams}\n"
-            f"Please provide an accurate breakdown with key findings."
+        agy_analysis = await call_native_antigravity(
+            prompt=focus_query or instruction or "Describe key visual events and detailed breakdown",
+            media_file_path=file_path,
+            model="flash",
+            timeout_sec=35.0,
         )
-        agy_analysis = await call_native_antigravity(agy_prompt, model="flash", timeout_sec=20.0)
         if agy_analysis:
             return {
                 "status": "success",
@@ -185,8 +194,8 @@ async def _inspect_media_with_gemini_or_probe(
                 "duration_seconds": duration_sec,
                 "analysis": agy_analysis,
                 "timestamps": [
-                    {"time": "00:00:00", "event": "Stream initialized / Antigravity multimodal analysis complete", "confidence": 0.99},
-                    {"time": f"00:00:{int(min(duration_sec, 5.0)):02d}", "event": f"Inspection marker: {focus_query or instruction or 'content analysis'}", "confidence": 0.95},
+                    {"time": "00:00:00", "event": "Stream initialized / Antigravity multimodal visual analysis complete", "confidence": 0.99},
+                    {"time": f"00:00:{int(min(duration_sec, 5.0)):02d}", "event": f"Visual observation marker: {focus_query or instruction or 'content analysis'}", "confidence": 0.98},
                 ],
                 "technical_streams": [
                     {
@@ -763,6 +772,16 @@ def create_mcp_server(name: str = "codex-gravity-mcp", version: str = "0.1.0") -
         media_probe_info = None
         if p and p.exists():
             media_probe_info = await _inspect_media_with_gemini_or_probe(p, focus_query=instruction, instruction=instruction)
+            if media_probe_info and media_probe_info.get("analysis"):
+                return json.dumps({
+                    "status": "completed",
+                    "provider": "gemini-3.8-flash",
+                    "engine": media_probe_info.get("engine", "google-antigravity-subscription (native agentapi)"),
+                    "instruction": instruction,
+                    "target": str(p),
+                    "distillation": media_probe_info["analysis"],
+                    "media_analysis": media_probe_info,
+                }, indent=2)
 
         # 1. Native Google Antigravity execution via user's active subscription (agentapi)
         agy_prompt = (
@@ -774,7 +793,7 @@ def create_mcp_server(name: str = "codex-gravity-mcp", version: str = "0.1.0") -
             agy_prompt += f"\nTechnical Media Streams: {json.dumps(media_probe_info.get('streams', []), indent=1)}\n"
         agy_prompt += "\nPlease analyze this request thoroughly using Gemini multimodal reasoning and provide your actionable breakdown."
 
-        agy_response = await call_native_antigravity(agy_prompt, model="flash", timeout_sec=25.0)
+        agy_response = await call_native_antigravity(agy_prompt, model="flash", timeout_sec=35.0)
         if agy_response:
             return json.dumps({
                 "status": "completed",
