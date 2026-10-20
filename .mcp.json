@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "codex-gravity": {
+      "command": "/home/ua/Desktop/codex-gravity/.venv/bin/codex-gravity-mcp",
+      "args": [
+        "--transport",
+        "stdio"
+      ]
+    }
+  }
+}
