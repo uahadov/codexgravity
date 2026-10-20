@@ -100,3 +100,69 @@ async def test_verification_and_auto_healing_loop():
             assert history[1].all_passed is True
         finally:
             await sandbox.cleanup()
+
+
+def test_root_cause_analyzer_multi_frame_traceback():
+    """
+    Ensures multi-frame tracebacks extract the innermost application frame,
+    not test runner / pytest framework frames from the top.
+    """
+    multi_frame = """
+Traceback (most recent call last):
+  File "/site-packages/_pytest/runner.py", line 341, in pytest_runtest_protocol
+    res = runtestprotocol(item, nextitem=nextitem)
+  File "/workspace/src/auth_service.py", line 75, in verify_token
+    raise PermissionError("Expired session token")
+PermissionError: Expired session token
+"""
+    diag = RootCauseAnalyzer.analyze(multi_frame, "")
+    assert diag.has_error is True
+    assert diag.error_type == "PermissionError"
+    assert diag.failed_file == "/workspace/src/auth_service.py"
+    assert diag.failed_line == 75
+    assert "Expired session token" in diag.error_message
+    assert 'raise PermissionError("Expired session token")' in (diag.target_code_snippet or "")
+
+
+def test_root_cause_analyzer_pytest_frame_extraction():
+    """
+    Ensures pytest's standard failure frame format is parsed for line number and code snippet.
+    """
+    pytest_stdout = """
+__________________________________ test_calc ___________________________________
+test_calc.py:4: in test_calc
+>       assert add(2, 2) == 4
+E       AssertionError: assert -2 == 4
+=========================== short test summary info ============================
+FAILED test_calc.py::test_calc - AssertionError: assert -2 == 4
+"""
+    diag = RootCauseAnalyzer.analyze(pytest_stdout, "")
+    assert diag.has_error is True
+    assert diag.error_type == "AssertionError"
+    assert diag.failed_file == "test_calc.py"
+    assert diag.failed_line == 4
+    assert diag.target_code_snippet == "assert add(2, 2) == 4"
+
+
+def test_root_cause_analyzer_jest_and_ts():
+    ts_err = "src/payment.ts:25:9 - error TS2339: Property 'currency' does not exist on type 'PaymentRequest'."
+    diag = RootCauseAnalyzer.analyze(ts_err, "")
+    assert diag.has_error is True
+    assert diag.failed_file == "src/payment.ts"
+    assert diag.failed_line == 25
+    assert diag.error_type == "TS2339"
+    assert "TypeScript type check failed" in diag.recommended_fix
+
+
+@pytest.mark.asyncio
+async def test_visual_viewport_overflow_detection():
+    inspector = VisualRegressionInspector()
+    results = await inspector.check_viewports("http://localhost:3000/overflow")
+
+    mobile_res = next(r for r in results if r.viewport_name == "mobile")
+    assert mobile_res.passed is False
+    assert mobile_res.regression_type == "HorizontalOverflow"
+    assert "flex-direction: column" in (mobile_res.suggested_css_fix or "")
+
+    desktop_res = next(r for r in results if r.viewport_name == "desktop")
+    assert desktop_res.passed is True

@@ -104,3 +104,54 @@ async def test_sandbox_path_traversal_prevention(temp_git_repo):
             await sandbox.write_file("../sneaky.txt", "exploit")
     finally:
         await sandbox.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_statelock_read_only_during_verification(temp_git_repo):
+    sandbox = SandboxManager(repo_root=temp_git_repo, task_id="readonly-test")
+    await sandbox.initialize()
+    try:
+        # Acquire write token and write code
+        await sandbox.state_lock.acquire_write_token("codex", state=LockState.CODING)
+        await sandbox.write_file("test.py", "x = 1\n", writer_id="codex")
+
+        # Transition to VERIFYING (release token)
+        await sandbox.state_lock.release_write_token("codex", next_state=LockState.VERIFYING)
+        assert sandbox.state_lock.state == LockState.VERIFYING
+
+        # Attempts to write during verification must raise PermissionError
+        with pytest.raises(PermissionError, match="Filesystem is read-only during VERIFYING phase"):
+            await sandbox.write_file("test.py", "x = 2\n")
+
+        with pytest.raises(PermissionError, match="Filesystem is read-only during VERIFYING phase"):
+            await sandbox.write_file("test.py", "x = 2\n", writer_id="codex")
+    finally:
+        await sandbox.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_sandbox_lifecycle_on_master_branch():
+    """
+    Tests that a repository with 'master' branch (instead of 'main')
+    is dynamically detected and merged cleanly.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        repo_dir = Path(tmpdir).resolve()
+        subprocess.run(["git", "init", "-b", "master"], cwd=repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True, capture_output=True)
+        (repo_dir / "README.md").write_text("# Master Branch Repo\n", encoding="utf-8")
+        subprocess.run(["git", "add", "README.md"], cwd=repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init master"], cwd=repo_dir, check=True, capture_output=True)
+
+        sandbox = SandboxManager(repo_root=repo_dir, task_id="master-branch-test")
+        await sandbox.initialize()
+        try:
+            assert sandbox.base_branch == "master"
+            await sandbox.write_file("master_file.py", "Y = 100\n")
+            await sandbox.commit_changes("add master file")
+            merged = await sandbox.merge_to_main()
+            assert merged is True
+            assert (repo_dir / "master_file.py").exists()
+        finally:
+            await sandbox.cleanup()

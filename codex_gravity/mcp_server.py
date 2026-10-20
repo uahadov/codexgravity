@@ -11,12 +11,25 @@ import asyncio
 import json
 import mimetypes
 import os
+import re
+import urllib.parse
 from pathlib import Path
 from typing import Any, Optional
 
 from mcp.server.mcpserver import MCPServer
 
 from codex_gravity.verifier import RootCauseAnalyzer, VisualRegressionInspector
+
+
+def _resolve_local_path(path_or_uri: str) -> Path:
+    """
+    Resolves local paths and file:// URIs into canonical Path instances.
+    """
+    clean = path_or_uri.strip()
+    if clean.startswith("file:"):
+        parsed = urllib.parse.urlparse(clean)
+        clean = urllib.parse.unquote(parsed.path)
+    return Path(clean).resolve()
 
 
 def create_mcp_server(name: str = "codex-gravity-mcp", version: str = "0.1.0") -> MCPServer:
@@ -35,7 +48,7 @@ def create_mcp_server(name: str = "codex-gravity-mcp", version: str = "0.1.0") -
         Only the local absolute file path is passed over MCP (under 1KB payload),
         completely avoiding base64 payload overflow on large video/audio files.
         """
-        p = Path(file_path).resolve()
+        p = _resolve_local_path(file_path)
         if not p.exists():
             return json.dumps({
                 "error": f"File does not exist: {file_path}",
@@ -77,7 +90,13 @@ def create_mcp_server(name: str = "codex-gravity-mcp", version: str = "0.1.0") -
         Context distillation: Slashing raw 100k+ tokens to ~400 tokens
         before Codex processes it, saving 97.9% of token costs.
         """
-        p = Path(directory_or_log).resolve()
+        stop_words = {"a", "an", "the", "in", "on", "of", "to", "for", "with", "is", "at", "by", "from", "and", "or", "as"}
+        raw_words = re.findall(r"\b[A-Za-z0-9_.-]+\b", issue_description)
+        terms = [w.lower() for w in raw_words if w.lower() not in stop_words and len(w) > 1]
+        if not terms:
+            terms = [w.lower() for w in raw_words]
+
+        p = _resolve_local_path(directory_or_log)
         raw_lines = 0
         distilled_content = ""
         ast_anchor = ""
@@ -86,36 +105,84 @@ def create_mcp_server(name: str = "codex-gravity-mcp", version: str = "0.1.0") -
             text = p.read_text(encoding="utf-8", errors="replace")
             lines = text.splitlines()
             raw_lines = len(lines)
-            # Find relevant error or snippet lines matching issue
-            relevant = []
+
+            # Score each line by matched search terms
+            best_idx = -1
+            best_score = 0
             for i, line in enumerate(lines):
-                if any(w.lower() in line.lower() for w in issue_description.split()):
-                    start_idx = max(0, i - 3)
-                    end_idx = min(len(lines), i + 4)
-                    relevant.extend(lines[start_idx:end_idx])
-                    ast_anchor = f"Line {i + 1}: {line.strip()}"
-                    break
-            distilled_content = "\n".join(relevant) if relevant else "\n".join(lines[-10:])
+                line_lower = line.lower()
+                score = sum(1 for t in terms if t in line_lower)
+                if score > best_score:
+                    best_score = score
+                    best_idx = i
+
+            if best_idx >= 0:
+                start_idx = max(0, best_idx - 3)
+                end_idx = min(len(lines), best_idx + 4)
+                distilled_content = "\n".join(lines[start_idx:end_idx])
+                ast_anchor = f"{p.name}:L{best_idx + 1}: {lines[best_idx].strip()}"
+            else:
+                distilled_content = "\n".join(lines[-10:])
+                ast_anchor = f"{p.name}:tail"
+
         elif p.exists() and p.is_dir():
-            # Search directory for relevant files
-            matches = []
+            best_file = None
+            best_line_idx = -1
+            best_score = 0
+            best_lines: list[str] = []
+
             for file_path in p.rglob("*"):
                 if file_path.is_file() and not any(part.startswith(".") for part in file_path.parts):
                     try:
                         content = file_path.read_text(encoding="utf-8", errors="ignore")
-                        raw_lines += len(content.splitlines())
-                        if any(w.lower() in content.lower() for w in issue_description.split()):
-                            matches.append(str(file_path.relative_to(p)))
+                        f_lines = content.splitlines()
+                        raw_lines += len(f_lines)
+
+                        for i, line in enumerate(f_lines):
+                            line_lower = line.lower()
+                            score = sum(1 for t in terms if t in line_lower)
+                            if score > best_score:
+                                best_score = score
+                                best_file = file_path
+                                best_line_idx = i
+                                best_lines = f_lines
                     except Exception:
                         pass
-            distilled_content = f"Matched files containing issue terms: {matches[:5]}"
-            ast_anchor = f"Candidate files: {len(matches)}"
+
+            if best_file and best_line_idx >= 0:
+                rel_path = str(best_file.relative_to(p))
+                start_idx = max(0, best_line_idx - 3)
+                end_idx = min(len(best_lines), best_line_idx + 5)
+                distilled_content = (
+                    f"# Extracted from {rel_path} (L{best_line_idx + 1})\n"
+                    + "\n".join(best_lines[start_idx:end_idx])
+                )
+                ast_anchor = f"{rel_path}:L{best_line_idx + 1}"
+            else:
+                distilled_content = f"Repository scan completed across {raw_lines} lines. No critical matches found."
+                ast_anchor = "Root repository search"
+
         else:
             # Direct log string input
             lines = directory_or_log.splitlines()
             raw_lines = len(lines)
-            distilled_content = "\n".join(lines[-15:])
-            ast_anchor = "Raw log tail snippet"
+            best_idx = -1
+            best_score = 0
+            for i, line in enumerate(lines):
+                line_lower = line.lower()
+                score = sum(1 for t in terms if t in line_lower)
+                if score > best_score:
+                    best_score = score
+                    best_idx = i
+
+            if best_idx >= 0:
+                start_idx = max(0, best_idx - 3)
+                end_idx = min(len(lines), best_idx + 4)
+                distilled_content = "\n".join(lines[start_idx:end_idx])
+                ast_anchor = f"Log line {best_idx + 1}: {lines[best_idx].strip()}"
+            else:
+                distilled_content = "\n".join(lines[-15:])
+                ast_anchor = "Raw log tail snippet"
 
         distilled_lines = len(distilled_content.splitlines())
         token_reduction_pct = round((1 - (distilled_lines / max(1, raw_lines))) * 100.0, 1)
@@ -134,13 +201,18 @@ def create_mcp_server(name: str = "codex-gravity-mcp", version: str = "0.1.0") -
         name="antigravity_verify_and_screenshot",
         description="Executes test command in terminal and inspects multi-viewport UI layout.",
     )
-    async def antigravity_verify_and_screenshot(test_command: str, ui_url: Optional[str] = None) -> str:
+    async def antigravity_verify_and_screenshot(
+        test_command: str,
+        ui_url: Optional[str] = None,
+        cwd: Optional[str] = None,
+    ) -> str:
         """
         Executes terminal verification and checks responsive viewports (Mobile, Tablet, Desktop).
         """
-        # Run terminal command
+        # Run terminal command in specified or current working directory
         process = await asyncio.create_subprocess_shell(
             test_command,
+            cwd=cwd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -170,6 +242,13 @@ def create_mcp_server(name: str = "codex-gravity-mcp", version: str = "0.1.0") -
             "viewport_checks": viewport_results,
         }
         return json.dumps(result, indent=2)
+
+    @server.tool(
+        name="call_antigravity_verifier",
+        description="Symmetrical tool: Request Antigravity terminal verification and visual regression checks.",
+    )
+    async def call_antigravity_verifier(test_command: str, ui_url: Optional[str] = None) -> str:
+        return await antigravity_verify_and_screenshot(test_command=test_command, ui_url=ui_url)
 
     @server.tool(
         name="call_codex_architect",

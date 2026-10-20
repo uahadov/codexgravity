@@ -111,3 +111,49 @@ def test_mcp_streamable_http_app():
     server = create_mcp_server()
     app = server.streamable_http_app()
     assert app is not None
+
+    # Deep verification: actual HTTP client interaction with MCP endpoint
+    from starlette.testclient import TestClient
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        resp = client.get("/mcp")
+        assert resp.status_code == 400
+        data = resp.json()
+        assert data["jsonrpc"] == "2.0"
+        assert "Missing session ID" in data["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_file_uri_support():
+    """
+    Tests that standard file:/// URIs are correctly resolved by MCP tools.
+    """
+    server = create_mcp_server()
+
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+        f.write(b"\x00" * 512)
+        media_path = f.name
+
+    try:
+        file_uri = f"file://{media_path}"
+        res = await server.call_tool(
+            "antigravity_inspect_media",
+            {"file_path": file_uri, "focus_query": "check zero copy uri"},
+        )
+        data = json.loads(res.content[0].text)
+        assert data["status"] == "success"
+        assert data["size_bytes"] == 512
+    finally:
+        Path(media_path).unlink(missing_ok=True)
+
+
+@pytest.mark.asyncio
+async def test_call_antigravity_verifier_tool():
+    server = create_mcp_server()
+    res = await server.call_tool(
+        "call_antigravity_verifier",
+        {"test_command": "python3 -c 'print(\"verifier tool ok\")'"},
+    )
+    data = json.loads(res.content[0].text)
+    assert data["passed"] is True
+    assert data["exit_code"] == 0
+    assert "verifier tool ok" in data["stdout_tail"]

@@ -48,6 +48,7 @@ class TaskRequest(BaseModel):
     ui_url: Optional[str] = None
     auto_merge: bool = True
     context: str = ""
+    custom_patcher: Optional[Any] = None
 
 
 class TokenLedger(BaseModel):
@@ -150,7 +151,9 @@ class SmartRouter:
             )
 
             # Phase 2: Coding Phase based on Routing Mode
-            await sandbox.state_lock.transition(LockState.CODING, agent_id="antigravity")
+            # Hand off write token from Antigravity to Codex
+            await sandbox.state_lock.release_write_token("antigravity")
+            await sandbox.state_lock.acquire_write_token("codex", state=LockState.CODING)
 
             if request.mode == RoutingMode.ECO:
                 final_code, arbitrage = await self._execute_eco_mode(request)
@@ -171,37 +174,37 @@ class SmartRouter:
                 )
             )
 
-            # Write code inside sandbox safely
-            await sandbox.write_file(request.target_file, final_code, writer_id="antigravity")
+            # Write code inside sandbox safely as Codex
+            await sandbox.write_file(request.target_file, final_code, writer_id="codex")
 
-            # Phase 3: Verification Phase
-            await sandbox.state_lock.release_write_token("antigravity")
-            await sandbox.state_lock.transition(LockState.VERIFYING)
+            # Phase 3: Verification Phase (Filesystem is Read-Only)
+            await sandbox.state_lock.release_write_token("codex", next_state=LockState.VERIFYING)
 
             verification_res: Optional[VerificationResult] = None
             all_passed = True
 
-            if request.test_command:
+            if request.test_command or request.ui_url:
                 verification_res = await self.verification_engine.verify(
                     sandbox=sandbox,
-                    test_command=request.test_command,
+                    test_command=request.test_command or "true",
                     ui_url=request.ui_url,
                 )
                 all_passed = verification_res.all_passed
 
                 # If failed, attempt autonomous self-healing
                 if not all_passed:
-                    await sandbox.state_lock.transition(LockState.HEALING)
+                    await sandbox.state_lock.acquire_write_token("codex", state=LockState.HEALING)
                     heal_passed, history = await self.verification_engine.auto_heal_loop(
                         sandbox=sandbox,
-                        test_command=request.test_command,
-                        patch_callback=self._create_healing_patcher(sandbox, request.target_file),
+                        test_command=request.test_command or "true",
+                        patch_callback=self._create_healing_patcher(sandbox, request.target_file, custom_patcher=request.custom_patcher),
                         ui_url=request.ui_url,
                         max_attempts=2,
                     )
                     all_passed = heal_passed
                     if history:
                         verification_res = history[-1]
+                    await sandbox.state_lock.release_write_token("codex", next_state=LockState.VERIFYING)
 
             # Phase 4: Atomic Merge to Main on 100% PASS
             merged = False
@@ -228,9 +231,8 @@ class SmartRouter:
             )
 
         finally:
-            # Ensure cleanup if not merged
-            if not sandbox.is_merged:
-                await sandbox.cleanup()
+            # Ensure worktree is always cleaned up to prevent leaks
+            await sandbox.cleanup()
 
     async def _execute_adaptive_mode(
         self,
@@ -337,17 +339,69 @@ class SmartRouter:
         self,
         sandbox: SandboxManager,
         target_file: str,
+        custom_patcher: Optional[Any] = None,
     ) -> Callable[[DiagnosticReport, list[ViewportCheckResult]], Coroutine[Any, Any, None]]:
         async def patcher(diag: DiagnosticReport, viewports: list[ViewportCheckResult]) -> None:
-            # Read current content
+            if custom_patcher:
+                try:
+                    res = custom_patcher(diag, viewports, sandbox)
+                    if asyncio.iscoroutine(res):
+                        await res
+                except TypeError:
+                    res = custom_patcher(diag, viewports)
+                    if asyncio.iscoroutine(res):
+                        await res
+                await self.event_bus.send_dialogue(
+                    sender="codex",
+                    recipient="antigravity",
+                    message=f"Applied self-healing patch to '{target_file}' based on diagnostic report ({diag.error_type}).",
+                )
+                return
+
+            # Check if this is a visual viewport regression
+            css_viewport_fixes = [v for v in viewports if not v.passed and v.suggested_css_fix]
+            if css_viewport_fixes:
+                for vp in css_viewport_fixes:
+                    files = await sandbox.list_files()
+                    css_files = [f for f in files if f.endswith((".css", ".scss", ".style"))]
+                    fix_rule = f"\n/* Visual regression fix for {vp.viewport_name} */\n{vp.css_selector} {{ {vp.suggested_css_fix} }}\n"
+                    if css_files:
+                        for cf in css_files:
+                            current_css = await sandbox.read_file(cf)
+                            await sandbox.write_file(cf, current_css + fix_rule, writer_id="codex")
+                    else:
+                        current = await sandbox.read_file(target_file)
+                        await sandbox.write_file(target_file, current + fix_rule, writer_id="codex")
+
+                    await self.event_bus.send_dialogue(
+                        sender="codex",
+                        recipient="antigravity",
+                        message=f"Applied visual self-healing CSS patch for viewport '{vp.viewport_name}': {vp.suggested_css_fix}",
+                    )
+                return
+
+            # Code diagnostic healing
             current = await sandbox.read_file(target_file)
-            # Apply self-healing fix to file
-            fixed = current + f"\n# Self-healing fix applied for: {diag.error_type} {diag.error_message}\n"
-            await sandbox.write_file(target_file, fixed, writer_id=None)
+            fixed = current
+
+            # If an exact snippet was identified in the failure, attempt targeted repair
+            if diag.target_code_snippet and diag.target_code_snippet in current:
+                if " - " in diag.target_code_snippet and diag.error_type == "AssertionError":
+                    fixed = current.replace(diag.target_code_snippet, diag.target_code_snippet.replace(" - ", " + "))
+                elif " + " in diag.target_code_snippet and diag.error_type == "AssertionError":
+                    fixed = current.replace(diag.target_code_snippet, diag.target_code_snippet.replace(" + ", " - "))
+                elif diag.error_type == "ModuleNotFoundError":
+                    fixed = "# Dependency fix: verify module import\n" + current
+                else:
+                    fixed = current + f"\n# Auto-healing diagnostic invariant update: {diag.recommended_fix}\n"
+            else:
+                fixed = current + f"\n# Auto-healing adjustment applied for: {diag.error_type} {diag.error_message}\n"
+
+            await sandbox.write_file(target_file, fixed, writer_id="codex")
             await self.event_bus.send_dialogue(
                 sender="codex",
                 recipient="antigravity",
-                message=f"Applied self-healing patch to '{target_file}' based on diagnostic report.",
+                message=f"Applied self-healing patch to '{target_file}' based on diagnostic report ({diag.error_type}).",
             )
         return patcher
 

@@ -65,14 +65,16 @@ class StateLock:
                 raise PermissionError(f"Agent '{agent_id}' cannot transition state. Write lock is held by '{self._active_writer}'")
             self._state = new_state
 
-    async def release_write_token(self, agent_id: str) -> None:
+    async def release_write_token(self, agent_id: str, next_state: Optional[LockState] = None) -> None:
         async with self._lock:
             if self._active_writer == agent_id:
                 self._active_writer = None
-                self._state = LockState.IDLE
+                self._state = next_state or LockState.IDLE
                 self._lock_time = None
 
     def can_write(self, agent_id: str) -> bool:
+        if self._state in (LockState.VERIFYING, LockState.MERGING, LockState.COMPLETED, LockState.FAILED):
+            return False
         return self._active_writer == agent_id or self._active_writer is None
 
 
@@ -140,6 +142,12 @@ class SandboxManager:
         if not check_head.success:
             raise RuntimeError(f"Git HEAD could not be resolved in {self.repo_root}. Please ensure at least one commit exists.")
 
+        # Detect active repository branch to avoid hardcoding "main" on repos with master/other branch
+        active_branch = await self._run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=self.repo_root)
+        if active_branch.success and active_branch.stdout.strip() and active_branch.stdout.strip() != "HEAD":
+            if self.base_branch == "main":
+                self.base_branch = active_branch.stdout.strip()
+
         # Create worktree with dedicated branch
         cmd = ["worktree", "add", "-b", self.branch_name, str(self.sandbox_dir), "HEAD"]
         res = await self._run_git(cmd, cwd=self.repo_root)
@@ -173,6 +181,9 @@ class SandboxManager:
         """
         if not self.is_created:
             await self.initialize()
+
+        if self.state_lock.state in (LockState.VERIFYING, LockState.MERGING, LockState.COMPLETED, LockState.FAILED):
+            raise PermissionError(f"Filesystem is read-only during {self.state_lock.state.value} phase")
 
         if writer_id and not self.state_lock.can_write(writer_id):
             raise PermissionError(f"Agent '{writer_id}' does not hold the active write lock")
@@ -325,20 +336,22 @@ class SandboxManager:
         """
         Removes the worktree and cleans up the shadow branch.
         """
-        if not self.is_created:
+        if not self.is_created and not self.sandbox_dir.exists():
             return
 
-        # Remove worktree
+        # 1. Remove worktree via git
         await self._run_git(["worktree", "remove", "--force", str(self.sandbox_dir)], cwd=self.repo_root)
-        await self._run_git(["worktree", "prune"], cwd=self.repo_root)
 
-        # Delete shadow branch if requested
-        if delete_branch:
-            await self._run_git(["branch", "-D", self.branch_name], cwd=self.repo_root)
-
-        # Remove leftover directory if git didn't remove it
+        # 2. Remove leftover directory if git didn't remove it
         if self.sandbox_dir.exists():
             shutil.rmtree(self.sandbox_dir, ignore_errors=True)
+
+        # 3. Prune worktrees in git
+        await self._run_git(["worktree", "prune"], cwd=self.repo_root)
+
+        # 4. Delete shadow branch if requested
+        if delete_branch:
+            await self._run_git(["branch", "-D", self.branch_name], cwd=self.repo_root)
 
         self.is_created = False
 

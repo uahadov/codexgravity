@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import re
+import textwrap
 import time
 import uuid
 from typing import Any, Callable, Coroutine, Optional, Union
@@ -32,6 +33,7 @@ class AnchorTarget(BaseModel):
     target_type: str = "function"  # function, class, method, block
     signature: str
     placeholder: str
+    target_snippet: Optional[str] = None
     context_hint: str = ""
 
 
@@ -160,7 +162,12 @@ class SpeculativeDraftingPipeline:
                 ast.parse(final_code)
             except SyntaxError as e:
                 # If syntax error occurs, keep raw code but log warning
-                pass
+                if self.event_bus:
+                    await self.event_bus.send_dialogue(
+                        sender="codex",
+                        recipient="antigravity",
+                        message=f"Warning: Synthesized Python code contains syntax error: {e}",
+                    )
 
         total_codex_tokens = sum(p.codex_tokens_used for p in patches)
         total_time_ms = skeleton.generation_time_ms + ((time.perf_counter() - start) * 1000.0)
@@ -203,7 +210,7 @@ class SpeculativeDraftingPipeline:
     def stitch_code(skeleton: DraftSkeleton, patches: list[CodexPatch]) -> str:
         """
         Stitches Codex patches into the skeleton using AST anchors, avoiding line number drift.
-        Preserves indentation properly.
+        Preserves indentation properly without mangling multi-line blocks.
         """
         patch_map = {p.anchor_id: p.replacement_code for p in patches}
         code = skeleton.skeleton_code
@@ -214,26 +221,30 @@ class SpeculativeDraftingPipeline:
 
             replacement = patch_map[anchor.anchor_id]
             placeholder = anchor.placeholder
+            target_snippet = anchor.target_snippet
 
-            # Find placeholder in code
-            if placeholder in code:
-                # Determine leading indentation of placeholder line
-                lines = code.splitlines(keepends=True)
-                new_lines = []
-                for line in lines:
-                    if placeholder in line:
-                        indent = re.match(r"^(\s*)", line).group(1)
-                        # Indent each line of replacement
-                        indented_repl_lines = []
-                        for i, r_line in enumerate(replacement.strip().splitlines()):
-                            if i == 0:
-                                indented_repl_lines.append(f"{indent}{r_line}\n")
-                            else:
-                                indented_repl_lines.append(f"{indent}{r_line}\n")
-                        new_lines.append("".join(indented_repl_lines))
-                    else:
-                        new_lines.append(line)
-                code = "".join(new_lines)
+            target_pattern = placeholder if (placeholder and placeholder in code) else (target_snippet if (target_snippet and target_snippet in code) else None)
+            if not target_pattern:
+                continue
+
+            # Dedent the replacement block to compute relative indentation cleanly
+            dedented_replacement = textwrap.dedent(replacement).strip()
+
+            lines = code.splitlines(keepends=True)
+            new_lines = []
+            for line in lines:
+                if target_pattern in line:
+                    indent = re.match(r"^(\s*)", line).group(1)
+                    indented_repl_lines = []
+                    for r_line in dedented_replacement.splitlines():
+                        if r_line.strip():
+                            indented_repl_lines.append(f"{indent}{r_line}\n")
+                        else:
+                            indented_repl_lines.append("\n")
+                    new_lines.append("".join(indented_repl_lines))
+                else:
+                    new_lines.append(line)
+            code = "".join(new_lines)
 
         return code
 
@@ -279,7 +290,6 @@ def execute_operation(request: OperationRequest) -> OperationResponse:
     Executes the primary business operation.
     """
     {placeholder}
-    return OperationResponse(success=True, data={{"status": "ok"}})
 '''
             anchors = [
                 AnchorTarget(
@@ -310,7 +320,6 @@ export interface OperationResponse {{
 
 export async function executeOperation(request: OperationRequest): Promise<OperationResponse> {{
   {placeholder}
-  return {{ success: true, data: {{ status: "ok" }} }};
 }}
 '''
             anchors = [

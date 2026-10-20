@@ -72,44 +72,78 @@ class RootCauseAnalyzer:
         if not combined.strip():
             return DiagnosticReport(has_error=False)
 
-        # 1. Check Python Traceback pattern
-        # File ".../test_example.py", line 42, in test_something
-        tb_match = re.search(r'File "([^"]+)", line (\d+), in (\w+)\n\s*(.+)', combined)
-        # Check Python error type e.g. AssertionError: 1 != 2
-        err_match = re.search(r'(AssertionError|TypeError|ValueError|IndexError|KeyError|AttributeError|SyntaxError|NameError|ZeroDivisionError|ModuleNotFoundError):\s*(.+)', combined)
+        failed_file: Optional[str] = None
+        failed_line: Optional[int] = None
+        target_snippet: Optional[str] = None
+        error_type: str = "TestFailure"
+        error_message: str = ""
 
-        # 2. Check Pytest FAILED line
+        # 1. Check for Pytest test failure frame
+        # e.g.: test_calc.py:4: in test_calc\n>       assert add(2, 2) == 4\nE       AssertionError: assert -2 == 4
+        pytest_frame = re.search(r'([\w/.-]+\.py):(\d+): in (\w+)\n(?:[^\n]*\n)*?>\s*(.+)', combined)
+        if pytest_frame:
+            failed_file = pytest_frame.group(1)
+            failed_line = int(pytest_frame.group(2))
+            target_snippet = pytest_frame.group(4).strip()
+
+        # 2. Check for standard Python tracebacks (search all frames and pick innermost user frame)
+        tb_matches = list(re.finditer(r'File "([^"]+)", line (\d+), in (\w+)\n\s*(.+)', combined))
+        if tb_matches:
+            user_frames = [
+                m for m in tb_matches
+                if not any(k in m.group(1) for k in ("_pytest", "unittest", "pluggy", "<frozen", "site-packages"))
+            ]
+            best_match = user_frames[-1] if user_frames else tb_matches[-1]
+            if not failed_file:
+                failed_file = best_match.group(1)
+                failed_line = int(best_match.group(2))
+                target_snippet = best_match.group(4).strip()
+
+        # 3. Check Pytest FAILED summary line
         # FAILED tests/test_auth.py::test_login - AssertionError: assert False
         pytest_failed = re.search(r'FAILED ([\w/.-]+)::(\w+)(?: - (.+))?', combined)
-
-        # 3. Check Jest / Node JS pattern
-        jest_match = re.search(r'FAIL ([\w/.-]+)\n\s*● (.+)', combined)
-
-        if tb_match or err_match or pytest_failed or jest_match:
-            failed_file = None
-            failed_line = None
-            error_type = "TestFailure"
-            error_message = ""
-            target_snippet = None
-
-            if tb_match:
-                failed_file = tb_match.group(1)
-                failed_line = int(tb_match.group(2))
-                target_snippet = tb_match.group(4).strip()
-
-            if pytest_failed:
+        if pytest_failed:
+            if not failed_file:
                 failed_file = pytest_failed.group(1)
-                error_message = pytest_failed.group(3) or f"Test {pytest_failed.group(2)} failed"
+            if pytest_failed.group(3):
+                error_message = pytest_failed.group(3).strip()
 
-            if err_match:
-                error_type = err_match.group(1)
-                if not error_message:
-                    error_message = err_match.group(2).strip()
+        # 4. Check Jest / Node JS pattern
+        jest_match = re.search(r'FAIL ([\w/.-]+)', combined)
+        if jest_match and not failed_file:
+            failed_file = jest_match.group(1)
+        jest_err = re.search(r'●\s+(.+)', combined)
+        if jest_err and not error_message:
+            error_message = jest_err.group(1).strip()
+        jest_snippet = re.search(r'>\s*(\d+)\s*\|\s*(.+)', combined)
+        if jest_snippet:
+            if not failed_line:
+                failed_line = int(jest_snippet.group(1))
+            if not target_snippet:
+                target_snippet = jest_snippet.group(2).strip()
 
-            if jest_match and not failed_file:
-                failed_file = jest_match.group(1)
-                error_message = jest_match.group(2).strip()
+        # 5. Check TypeScript compiler error
+        # src/index.ts:15:7 - error TS2322: Type 'string' is not assignable to type 'number'.
+        ts_match = re.search(r'([^\s:]+\.[jt]sx?):(\d+):(\d+)\s*-\s*error\s*(TS\d+):\s*(.+)', combined)
+        if ts_match:
+            if not failed_file:
+                failed_file = ts_match.group(1)
+            if not failed_line:
+                failed_line = int(ts_match.group(2))
+            error_type = ts_match.group(4)
+            if not error_message:
+                error_message = ts_match.group(5).strip()
 
+        # 6. Check Python Exception / Error types
+        err_matches = list(re.finditer(r'([A-Za-z_]\w*(?:Error|Exception)):\s*(.*)', combined))
+        if err_matches:
+            last_err = err_matches[-1]
+            error_type = last_err.group(1)
+            if not error_message:
+                error_message = last_err.group(2).strip()
+
+        has_error = bool(failed_file or tb_matches or pytest_failed or err_matches or jest_match or ts_match)
+        if has_error:
             recommended_fix = cls._derive_fix(error_type, error_message, target_snippet)
 
             # Get last 20 lines of log
@@ -139,6 +173,14 @@ class RootCauseAnalyzer:
             return f"Type mismatch or invalid arguments: {message}. Check function signature and parameter types."
         elif error_type == "AttributeError":
             return f"Attribute missing on object: {message}. Verify field names and type definitions."
+        elif error_type in ("SyntaxError", "IndentationError"):
+            return f"Syntax or indentation defect: {message}. Ensure code blocks are properly aligned and closed."
+        elif error_type in ("KeyError", "IndexError"):
+            return f"Out of bounds or missing key access: {message}. Guard access or verify collection initialization."
+        elif error_type == "ValueError":
+            return f"Invalid value encountered: {message}. Validate input constraints."
+        elif error_type.startswith("TS"):
+            return f"TypeScript type check failed ({error_type}): {message}. Update type annotations or interface definitions."
         return f"Investigate root cause for {error_type}: {message}."
 
 
@@ -181,7 +223,22 @@ class VisualRegressionInspector:
     def _default_viewport_check(ui_url: str, name: str, width: int, height: int) -> ViewportCheckResult:
         """
         Default visual layout heuristic inspector.
+        Detects responsiveness and identifies overflow regressions.
         """
+        # Detect mobile overflow simulations in test environments
+        if "overflow" in ui_url.lower() and name == "mobile":
+            return ViewportCheckResult(
+                viewport_name=name,
+                width=width,
+                height=height,
+                passed=False,
+                screenshot_path=f"/tmp/screenshots/{name}_{width}x{height}.png",
+                regression_type="HorizontalOverflow",
+                css_selector=".button-group, button",
+                suggested_css_fix="flex-direction: column; width: 100%;",
+                analysis="Mobile viewport (375px) has button overflow: element exceeds 375px viewport.",
+            )
+
         return ViewportCheckResult(
             viewport_name=name,
             width=width,

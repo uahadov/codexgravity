@@ -17,6 +17,7 @@ def main() -> None:
     parser.add_argument("--file", "-f", type=str, required=True, help="Target file path")
     parser.add_argument("--mode", "-m", choices=["adaptive", "eco", "power"], default="adaptive", help="Routing mode")
     parser.add_argument("--test-cmd", "-t", type=str, default=None, help="Test command to verify (e.g. pytest)")
+    parser.add_argument("--ui-url", "-u", type=str, default=None, help="Local web UI URL to verify responsive viewports")
     parser.add_argument("--no-merge", action="store_true", help="Do not merge into main even if tests pass")
 
     args = parser.parse_args()
@@ -32,6 +33,7 @@ def main() -> None:
         target_file=args.file,
         mode=mode_map[args.mode],
         test_command=args.test_cmd,
+        ui_url=args.ui_url,
         auto_merge=not args.no_merge,
     )
 
