@@ -311,184 +311,818 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Codex-Gravity MCP Dashboard</title>
+  <title>Codex-Gravity MCP Server</title>
   <style>
     :root {
-      --bg: #0d1117;
-      --card-bg: #161b22;
-      --border: #30363d;
-      --accent: #58a6ff;
-      --green: #3fb950;
-      --text: #c9d1d9;
-      --text-white: #f0f6fc;
-      --badge-bg: #21262d;
+      --bg: #070709;
+      --card-bg: #101014;
+      --card-bg-elevated: #16161c;
+      --card-hover: #1b1b22;
+      --border: rgba(255, 255, 255, 0.08);
+      --border-focus: rgba(249, 115, 22, 0.5);
+      --accent: #f97316;
+      --accent-hover: #ea580c;
+      --accent-muted: rgba(249, 115, 22, 0.12);
+      --accent-border: rgba(249, 115, 22, 0.28);
+      --text: #f4f4f6;
+      --text-secondary: #90909a;
+      --text-muted: #5e5e68;
+      --code-bg: #0a0a0d;
+      --success: #10b981;
     }
+
     * { box-sizing: border-box; margin: 0; padding: 0; }
+    
     body {
       background: var(--bg);
       color: var(--text);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-      padding: 32px 16px;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+      padding: 0;
       line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
     }
-    .container { max-width: 960px; margin: 0 auto; }
-    .header {
+
+    /* Top Apple-Style Nav */
+    .nav {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: rgba(10, 10, 14, 0.82);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 28px;
       display: flex;
       justify-content: space-between;
       align-items: center;
-      padding-bottom: 24px;
-      border-bottom: 1px solid var(--border);
-      margin-bottom: 24px;
     }
-    .title-area h1 { font-size: 26px; color: var(--text-white); display: flex; align-items: center; gap: 10px; }
-    .title-area p { color: #8b949e; margin-top: 4px; font-size: 14px; }
-    .status-badge {
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      color: var(--text);
+    }
+
+    .brand-mark {
+      width: 24px;
+      height: 24px;
+      background: linear-gradient(135deg, var(--accent), #c2410c);
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .nav-status {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .status-pill {
       display: inline-flex;
       align-items: center;
       gap: 8px;
-      background: rgba(63, 185, 80, 0.15);
-      color: var(--green);
-      padding: 6px 14px;
-      border-radius: 20px;
-      border: 1px solid rgba(63, 185, 80, 0.4);
-      font-weight: 600;
-      font-size: 13px;
+      padding: 5px 12px;
+      border-radius: 999px;
+      background: var(--accent-muted);
+      border: 1px solid var(--accent-border);
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--accent);
+      letter-spacing: 0.01em;
     }
-    .pulse {
-      width: 10px; height: 10px; border-radius: 50%; background: var(--green);
-      box-shadow: 0 0 10px var(--green);
-      animation: pulse-anim 1.5s infinite;
+
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--accent);
+      transition: background 0.3s;
     }
-    @keyframes pulse-anim { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(1.2); } }
-    .alert-box {
-      background: rgba(88, 166, 255, 0.08);
-      border-left: 4px solid var(--accent);
-      padding: 16px 20px;
+
+    .latency-pill {
+      font-size: 11px;
+      color: var(--text-secondary);
+      font-family: ui-monospace, monospace;
+      padding: 4px 8px;
+      background: rgba(255, 255, 255, 0.04);
       border-radius: 6px;
-      margin-bottom: 28px;
-      font-size: 14px;
+      border: 1px solid var(--border);
     }
-    .alert-box strong { color: var(--text-white); }
-    .alert-box code { background: #21262d; padding: 2px 6px; border-radius: 4px; color: #ff7b72; font-size: 13px; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 32px; }
-    .card {
+
+    /* Main Container */
+    .container {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 48px 24px 80px;
+    }
+
+    /* Hero Section */
+    .hero {
+      text-align: left;
+      margin-bottom: 48px;
+      padding-bottom: 36px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .hero-eyebrow {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--accent);
+      margin-bottom: 12px;
+    }
+
+    .hero-title {
+      font-size: 38px;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      color: #ffffff;
+      line-height: 1.15;
+      margin-bottom: 14px;
+    }
+
+    .hero-subtitle {
+      font-size: 16px;
+      color: var(--text-secondary);
+      max-width: 760px;
+      line-height: 1.6;
+    }
+
+    /* Metrics Grid */
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+      margin-bottom: 44px;
+    }
+
+    .metric-card {
       background: var(--card-bg);
       border: 1px solid var(--border);
-      border-radius: 8px;
+      border-radius: 12px;
       padding: 20px;
-      transition: transform 0.2s, border-color 0.2s;
+      transition: border-color 0.2s, background 0.2s;
     }
-    .card:hover { transform: translateY(-2px); border-color: var(--accent); }
-    .card-title { color: var(--text-white); font-size: 16px; font-weight: 600; margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; }
-    .tag { font-size: 11px; padding: 2px 8px; border-radius: 12px; background: var(--badge-bg); color: var(--accent); border: 1px solid var(--border); }
-    .card-desc { font-size: 13px; color: #8b949e; margin-bottom: 12px; }
-    .code-box {
-      background: #0d1117;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 16px;
-      font-family: monospace;
+
+    .metric-card:hover {
+      border-color: var(--border-focus);
+      background: var(--card-bg-elevated);
+    }
+
+    .metric-label {
+      font-size: 12px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 8px;
+    }
+
+    .metric-value {
+      font-size: 26px;
+      font-weight: 700;
+      color: var(--text);
+      letter-spacing: -0.02em;
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+    }
+
+    .metric-value span {
+      font-size: 14px;
+      color: var(--accent);
+      font-weight: 500;
+    }
+
+    /* Section Headings */
+    .section-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      margin-bottom: 20px;
+    }
+
+    .section-title {
+      font-size: 20px;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      color: #ffffff;
+    }
+
+    .section-desc {
       font-size: 13px;
-      color: #79c0ff;
-      overflow-x: auto;
-      margin-bottom: 24px;
+      color: var(--text-secondary);
+      margin-top: 4px;
+    }
+
+    /* Real Working Playground Box */
+    .playground-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 28px;
+      margin-bottom: 48px;
+    }
+
+    .form-row {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 18px;
+    }
+
+    .form-row label {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .form-row label span.helper {
+      font-size: 11px;
+      color: var(--text-muted);
+      font-weight: 400;
+    }
+
+    select, input, textarea {
+      width: 100%;
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 13px;
+      padding: 10px 14px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    select:focus, input:focus, textarea:focus {
+      border-color: var(--accent);
+    }
+
+    .btn-group {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      margin-top: 20px;
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      color: #ffffff;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 22px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      transition: background 0.2s, transform 0.1s;
+    }
+
+    .btn-primary:hover {
+      background: var(--accent-hover);
+    }
+
+    .btn-primary:active {
+      transform: scale(0.98);
+    }
+
+    .btn-secondary {
+      background: transparent;
+      color: var(--text-secondary);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 18px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: color 0.2s, border-color 0.2s;
+    }
+
+    .btn-secondary:hover {
+      color: var(--text);
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+
+    .output-console {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px 20px;
+      margin-top: 24px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 12.5px;
+      color: #e4e4e7;
+      max-height: 420px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
       position: relative;
     }
-    .section-title { font-size: 18px; color: var(--text-white); margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
-    .copy-btn {
-      position: absolute;
-      top: 10px;
-      right: 10px;
-      background: #21262d;
-      color: var(--text-white);
-      border: 1px solid var(--border);
-      padding: 4px 10px;
+
+    .output-badge {
+      display: inline-block;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      padding: 2px 8px;
       border-radius: 4px;
-      cursor: pointer;
-      font-size: 12px;
+      background: var(--accent-muted);
+      color: var(--accent);
+      margin-bottom: 10px;
     }
-    .copy-btn:hover { background: #30363d; }
-    .btn {
-      background: #238636;
-      color: #fff;
-      border: none;
-      padding: 8px 16px;
+
+    /* Bento Grid for Tools */
+    .tools-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 16px;
+      margin-bottom: 48px;
+    }
+
+    .tool-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 22px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      transition: border-color 0.2s, background 0.2s;
+    }
+
+    .tool-card:hover {
+      border-color: var(--border-focus);
+      background: var(--card-bg-elevated);
+    }
+
+    .tool-top {
+      margin-bottom: 14px;
+    }
+
+    .tool-badge {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--accent);
+      background: var(--accent-muted);
+      padding: 3px 8px;
       border-radius: 6px;
+      margin-bottom: 10px;
+      border: 1px solid var(--accent-border);
+    }
+
+    .tool-title {
+      font-size: 15px;
+      font-weight: 600;
+      color: #ffffff;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      margin-bottom: 8px;
+    }
+
+    .tool-desc {
+      font-size: 13px;
+      color: var(--text-secondary);
+      line-height: 1.5;
+    }
+
+    .tool-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-top: 14px;
+      border-top: 1px solid rgba(255, 255, 255, 0.04);
+      margin-top: 14px;
+    }
+
+    .tool-action {
+      font-size: 12px;
+      color: var(--accent);
+      background: none;
+      border: none;
       cursor: pointer;
       font-weight: 500;
-      font-size: 13px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
     }
-    .btn:hover { background: #2ea043; }
+
+    .tool-action:hover {
+      text-decoration: underline;
+    }
+
+    /* Configuration Card */
+    .config-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 26px;
+      margin-bottom: 40px;
+    }
+
+    .code-container {
+      position: relative;
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px 20px;
+      margin-top: 14px;
+      font-family: ui-monospace, monospace;
+      font-size: 12.5px;
+      color: #d4d4d8;
+      overflow-x: auto;
+    }
+
+    .copy-button {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-size: 11px;
+      padding: 5px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .copy-button:hover {
+      background: rgba(255, 255, 255, 0.12);
+    }
+
+    .footer {
+      text-align: center;
+      padding-top: 32px;
+      border-top: 1px solid var(--border);
+      font-size: 12px;
+      color: var(--text-muted);
+    }
   </style>
 </head>
 <body>
-  <div class="container">
-    <div class="header">
-      <div class="title-area">
-        <h1>⚡ Codex-Gravity MCP Server</h1>
-        <p>OpenAI Codex & Google Antigravity (Gemini 3.8 Flash) Hybrid Architecture</p>
+
+  <!-- Minimal Nav -->
+  <header class="nav">
+    <div class="brand">
+      <div class="brand-mark">CG</div>
+      <span>Codex · Gravity</span>
+    </div>
+    <div class="nav-status">
+      <span class="latency-pill" id="latencyDisplay">Ping: -- ms</span>
+      <div class="status-pill">
+        <span class="status-dot" id="statusDot"></span>
+        <span id="statusText">Port 8000 · Online</span>
       </div>
-      <div class="status-badge">
-        <span class="pulse"></span>
-        <span>ONLINE (Port 8000)</span>
+    </div>
+  </header>
+
+  <main class="container">
+
+    <!-- Hero Header -->
+    <section class="hero">
+      <div class="hero-eyebrow">Enterprise Symmetrical MCP Gateway</div>
+      <h1 class="hero-title">Codex-Gravity Architecture</h1>
+      <p class="hero-subtitle">
+        OpenAI Codex-in alqoritmik biznes nüvəsi ilə Google Antigravity-nin (Gemini 3.8 Flash) multimodal görmə və kontekst süzgəcini vahid Model Context Protocol üzərində birləşdirən işlək sistem paneli.
+      </p>
+    </section>
+
+    <!-- Metrics -->
+    <section class="metrics-grid">
+      <div class="metric-card">
+        <div class="metric-label">Xarici API Açar Tələbi</div>
+        <div class="metric-value">0 <span>Açar (100% Yerli)</span></div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Kontekst Sıxılma Dərəcəsi</div>
+        <div class="metric-value">97.9% <span>Token Qənaəti</span></div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Aktiv Native Alətlər</div>
+        <div class="metric-value">6 <span>Alət Qeydiyyatda</span></div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Multimodal Nüvə</div>
+        <div class="metric-value">Flash <span>Gemini 3.8</span></div>
+      </div>
+    </section>
+
+    <!-- REAL WORKING TOOL PLAYGROUND -->
+    <section class="playground-card" id="playground">
+      <div class="section-header">
+        <div>
+          <h2 class="section-title">Canlı Alət İcrası (Tool Playground)</h2>
+          <p class="section-desc">MCP alətlərini birbaşa brauzerdən real rejimdə çağırın və serverin verdiyi həqiqi cavabı izləyin.</p>
+        </div>
+      </div>
+
+      <div class="form-row">
+        <label for="toolSelect">
+          İcra Ediləcək MCP Aləti
+          <span class="helper">Bütün 6 alət tam işləkdir</span>
+        </label>
+        <select id="toolSelect" onchange="onToolSelectChange()">
+          <option value="call_antigravity_multimodal">call_antigravity_multimodal (Google Antigravity Multimodal Analiz)</option>
+          <option value="antigravity_inspect_media">antigravity_inspect_media (Zero-Copy Fayl və Vizual Təhlil)</option>
+          <option value="antigravity_distill_context">antigravity_distill_context (AST və Loq Sıxılması)</option>
+          <option value="antigravity_verify_and_screenshot">antigravity_verify_and_screenshot (Terminal və UI Yoxlaması)</option>
+          <option value="call_codex_architect">call_codex_architect (Codex Alqoritmik Generasiya)</option>
+          <option value="call_antigravity_verifier">call_antigravity_verifier (Sandbox Verifikasiyası)</option>
+        </select>
+      </div>
+
+      <div id="dynamicInputs"></div>
+
+      <div class="btn-group">
+        <button class="btn-primary" id="runBtn" onclick="runSelectedTool()">
+          <span>⚡ Aləti İcra Et</span>
+        </button>
+        <button class="btn-secondary" onclick="loadSampleData()">
+          Nümunə Göstəriciləri Yüklə
+        </button>
+      </div>
+
+      <div class="output-console" id="consoleContainer" style="display: none;">
+        <div class="output-badge" id="outputBadge">Nəticə</div>
+        <div id="consoleOutput"></div>
+      </div>
+    </section>
+
+    <!-- 6 NATIVE TOOLS SHOWCASE -->
+    <div class="section-header">
+      <div>
+        <h2 class="section-title">Aktiv MCP Alətləri Kataloqu</h2>
+        <p class="section-desc">Codex və Antigravity üçün qeydiyyata alınmış simmetrik maşın funksiyaları.</p>
       </div>
     </div>
 
-    <div class="alert-box">
-      <strong>ℹ️ Niyə brauzerdə <code>/mcp</code> ünvanında "Missing session ID" görürdünüz?</strong><br>
-      Çünki <code>http://127.0.0.1:8000/mcp</code> insan üçün veb səhifəsi deyil, AI Modelləri (OpenAI Codex, Claude, Antigravity) üçün rəsmi <strong>JSON-RPC 2.0 Streamable HTTP</strong> qapısıdır. LLM-lər bu ünvana qoşulduqda avtomatik sessiya başladır. Bu ana səhifə (<code>/</code>) isə sizin üçün monitorinq və test lövhəsidir.
-    </div>
+    <section class="tools-grid">
+      <div class="tool-card">
+        <div class="tool-top">
+          <span class="tool-badge">Simmetrik Multimodal</span>
+          <div class="tool-title">call_antigravity_multimodal</div>
+          <div class="tool-desc">Codex Antigravity-yə video, şəkil və ya mürəkkəb kontekst göndərərək Gemini 3.8 Flash-ın təbii görmə təhlilini alır.</div>
+        </div>
+        <div class="tool-footer">
+          <span style="font-size: 11px; color: var(--text-muted);">Sıfır-Kopiya Əlaqə</span>
+          <button class="tool-action" onclick="quickSelectTool('call_antigravity_multimodal')">Sınaqdan Keçir →</button>
+        </div>
+      </div>
 
-    <h2 class="section-title">🛠️ Aktiv MCP Alətləri (6 Ədəd)</h2>
-    <div class="grid">
-      <div class="card">
-        <div class="card-title">antigravity_inspect_media <span class="tag">Gemini Flash</span></div>
-        <div class="card-desc">Video və audio faylların Zero-Copy üsulu ilə saniyələr içində multimodal təhlili və vaxt kodlu hadisə xülasəsi.</div>
+      <div class="tool-card">
+        <div class="tool-top">
+          <span class="tool-badge">Zero-Copy Vizual</span>
+          <div class="tool-title">antigravity_inspect_media</div>
+          <div class="tool-desc">Fayl diskdən heç bir Base64 payload overflow yaratmadan birbaşa oxunur və zaman nişanlı hadisə qeydləri çıxarılır.</div>
+        </div>
+        <div class="tool-footer">
+          <span style="font-size: 11px; color: var(--text-muted);">&lt; 1KB MCP Payload</span>
+          <button class="tool-action" onclick="quickSelectTool('antigravity_inspect_media')">Sınaqdan Keçir →</button>
+        </div>
       </div>
-      <div class="card">
-        <div class="card-title">antigravity_distill_context <span class="tag">97.9% Qənaət</span></div>
-        <div class="card-desc">100k+ sətirlik böyük repozitori və ya test loqlarını AST kontekstinə sıxaraq Codex-ə ötürür.</div>
-      </div>
-      <div class="card">
-        <div class="card-title">antigravity_verify_and_screenshot <span class="tag">Self-Healing</span></div>
-        <div class="card-desc">Terminal testlərini icra edir, xəta kökünü (root cause) tapır və mobil/planşet/desktop vizual UI yoxlaması aparır.</div>
-      </div>
-      <div class="card">
-        <div class="card-title">call_antigravity_multimodal <span class="tag">Simmetrik</span></div>
-        <div class="card-desc">Codex-in birbaşa Antigravity-dən media və böyük kontekst köməyi tələb etməsi üçün qapı.</div>
-      </div>
-      <div class="card">
-        <div class="card-title">call_antigravity_verifier <span class="tag">Simmetrik</span></div>
-        <div class="card-desc">Codex-in yazdığı kodların sandbox daxilində yoxlanması üçün simmetrik sorğu qapısı.</div>
-      </div>
-      <div class="card">
-        <div class="card-title">call_codex_architect <span class="tag">Codex Core</span></div>
-        <div class="card-desc">Antigravity-nin OpenAI Codex-dən dərin alqoritmik biznes məntiqi və refaktorinq tələb etməsi üçün qapı.</div>
-      </div>
-    </div>
 
-    <h2 class="section-title">⚙️ Codex və Digər Alətlərə Qoşulma Konfiqurasiyası</h2>
-    <p style="font-size: 13px; color: #8b949e; margin-bottom: 8px;">Codex / Claude / Antigravity <code>mcpServers</code> konfiqurasiyasına bunu əlavə edin:</p>
-    <div class="code-box">
-      <button class="copy-btn" onclick="navigator.clipboard.writeText(this.nextElementSibling.innerText); this.innerText='Kopyalandı!'; setTimeout(()=>this.innerText='Kopyala', 2000)">Kopyala</button>
-      <pre>{
+      <div class="tool-card">
+        <div class="tool-top">
+          <span class="tool-badge">97.9% Sıxılma</span>
+          <div class="tool-title">antigravity_distill_context</div>
+          <div class="tool-desc">100k+ sətirlik kütləvi repozitoriya və ya test loqlarını saniyələr içində AST kontekstinə yığaraq Codex-ə ötürür.</div>
+        </div>
+        <div class="tool-footer">
+          <span style="font-size: 11px; color: var(--text-muted);">AST Pinpointer</span>
+          <button class="tool-action" onclick="quickSelectTool('antigravity_distill_context')">Sınaqdan Keçir →</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <div class="tool-top">
+          <span class="tool-badge">Self-Healing</span>
+          <div class="tool-title">antigravity_verify_and_screenshot</div>
+          <div class="tool-desc">Terminal komandasını izolyasiya edilmiş mühitdə icra edir, xətanın kök səbəbini tapır və mobil/desktop reqresiya yoxlaması aparır.</div>
+        </div>
+        <div class="tool-footer">
+          <span style="font-size: 11px; color: var(--text-muted);">Root Cause Analyzer</span>
+          <button class="tool-action" onclick="quickSelectTool('antigravity_verify_and_screenshot')">Sınaqdan Keçir →</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <div class="tool-top">
+          <span class="tool-badge">Codex Core</span>
+          <div class="tool-title">call_codex_architect</div>
+          <div class="tool-desc">Antigravity-nin OpenAI Codex-dən dərin biznes məntiqi və strukturlaşdırılmış alqoritm generasiyası istəməsi üçün simmetrik qapı.</div>
+        </div>
+        <div class="tool-footer">
+          <span style="font-size: 11px; color: var(--text-muted);">o3-mini Logic</span>
+          <button class="tool-action" onclick="quickSelectTool('call_codex_architect')">Sınaqdan Keçir →</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <div class="tool-top">
+          <span class="tool-badge">Sandbox Verifier</span>
+          <div class="tool-title">call_antigravity_verifier</div>
+          <div class="tool-desc">Codex-in yazdığı kodların əsas budağa zərər vermədən gizli worktree sandbox-da təhlükəsiz test olunması qapısı.</div>
+        </div>
+        <div class="tool-footer">
+          <span style="font-size: 11px; color: var(--text-muted);">Git Worktree Sandbox</span>
+          <button class="tool-action" onclick="quickSelectTool('call_antigravity_verifier')">Sınaqdan Keçir →</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Codex Client Config -->
+    <section class="config-card">
+      <div class="section-title">Codex & Claude Qoşulma Konfiqurasiyası</div>
+      <p class="section-desc">Client tərəfində <code>mcpServers</code> daxilinə bu bloku əlavə etməklə alətlər dərhal aktivləşir:</p>
+      
+      <div class="code-container">
+        <button class="copy-button" onclick="copySnippet(this)">Kopyala</button>
+        <pre id="configSnippet">{
   "mcpServers": {
-    "codex-gravity-http": {
+    "codex-gravity": {
       "url": "http://127.0.0.1:8000/mcp"
-    },
-    "codex-gravity-stdio": {
-      "command": "/home/ua/Desktop/codex-gravity/.venv/bin/codex-gravity-mcp",
-      "args": ["--transport", "stdio"]
     }
   }
 }</pre>
-    </div>
+      </div>
+    </section>
 
-    <div style="display: flex; gap: 12px; align-items: center;">
-      <button class="btn" onclick="fetch('/health').then(r=>r.json()).then(d=>alert('Server Status: ' + JSON.stringify(d, null, 2)))">Canlı Server Statusunu Yoxla (/health)</button>
-      <span style="font-size: 13px; color: #8b949e;">Endpoint: <code>http://127.0.0.1:8000/mcp</code></span>
-    </div>
-  </div>
+    <footer class="footer">
+      Codex-Gravity Architecture · Model Context Protocol (MCP 2024-11-05) · Google Antigravity & OpenAI Codex
+    </footer>
+
+  </main>
+
+  <script>
+    // Live ping and status updater
+    async function pingServer() {
+      const start = performance.now();
+      try {
+        const res = await fetch('/health');
+        const latency = Math.round(performance.now() - start);
+        if (res.ok) {
+          document.getElementById('latencyDisplay').innerText = `Ping: ${latency} ms`;
+          document.getElementById('statusDot').style.background = '#f97316';
+          document.getElementById('statusText').innerText = 'Port 8000 · Online';
+        } else {
+          throw new Error('Not OK');
+        }
+      } catch (err) {
+        document.getElementById('latencyDisplay').innerText = 'Xəta';
+        document.getElementById('statusDot').style.background = '#ef4444';
+        document.getElementById('statusText').innerText = 'Server Oflayn';
+      }
+    }
+    setInterval(pingServer, 4000);
+    pingServer();
+
+    // Playground tool input schemas
+    const toolSchemas = {
+      call_antigravity_multimodal: [
+        { name: 'media_path', label: 'Media Fayl Yolu və ya Kontekst', default: '/tmp/test.png', type: 'text' },
+        { name: 'instruction', label: 'Antigravity üçün Təlimat', default: 'Şəkildəki dizaynı və UI elementlərini analiz et.', type: 'text' }
+      ],
+      antigravity_inspect_media: [
+        { name: 'file_path', label: 'Lokal Media Fayl Yolu (Video/Şəkil/Audio)', default: '/tmp/test.png', type: 'text' },
+        { name: 'focus_query', label: 'Axtarış / Təhlil Hədəfi', default: 'Pəncərə başlığı və aktiv menyu', type: 'text' }
+      ],
+      antigravity_distill_context: [
+        { name: 'directory_or_log', label: 'Loq Mətni və ya Fayl Yolu', default: '2026-10-21 01:20:00 ERROR PaymentTimeoutException at gateway/stripe.py:84', type: 'textarea' },
+        { name: 'issue_description', label: 'Axtarılan Problem Açarı', default: 'PaymentTimeoutException stripe', type: 'text' }
+      ],
+      antigravity_verify_and_screenshot: [
+        { name: 'test_command', label: 'İcra Olunacaq Terminal Komandası', default: 'python3 -c "print(\'Antigravity Test OK\')"', type: 'text' },
+        { name: 'ui_url', label: 'UI URL (Opsional vizual reqresiya yoxlaması)', default: 'http://127.0.0.1:8000', type: 'text' }
+      ],
+      call_codex_architect: [
+        { name: 'prompt', label: 'Refaktorinq və ya Məntiq Tələbi', default: 'LRU keş strukturunu optimallaşdır', type: 'text' },
+        { name: 'code_context', label: 'Mövcud Kod Konteksti', default: 'cache = {}', type: 'textarea' }
+      ],
+      call_antigravity_verifier: [
+        { name: 'test_command', label: 'Sandbox Test Komandası', default: 'echo "Verification pass"', type: 'text' }
+      ]
+    };
+
+    function onToolSelectChange() {
+      const toolName = document.getElementById('toolSelect').value;
+      const inputs = toolSchemas[toolName] || [];
+      const container = document.getElementById('dynamicInputs');
+      container.innerHTML = '';
+
+      inputs.forEach(inp => {
+        const row = document.createElement('div');
+        row.className = 'form-row';
+        const label = document.createElement('label');
+        label.innerText = inp.label;
+        
+        let el;
+        if (inp.type === 'textarea') {
+          el = document.createElement('textarea');
+          el.rows = 3;
+        } else {
+          el = document.createElement('input');
+          el.type = 'text';
+        }
+        el.id = `input_${inp.name}`;
+        el.value = inp.default;
+        
+        row.appendChild(label);
+        row.appendChild(el);
+        container.appendChild(row);
+      });
+    }
+
+    function quickSelectTool(name) {
+      document.getElementById('toolSelect').value = name;
+      onToolSelectChange();
+      document.getElementById('playground').scrollIntoView({ behavior: 'smooth' });
+    }
+
+    function loadSampleData() {
+      onToolSelectChange();
+    }
+
+    async function runSelectedTool() {
+      const toolName = document.getElementById('toolSelect').value;
+      const inputs = toolSchemas[toolName] || [];
+      const args = {};
+      inputs.forEach(inp => {
+        const val = document.getElementById(`input_${inp.name}`)?.value || '';
+        args[inp.name] = val;
+      });
+
+      const btn = document.getElementById('runBtn');
+      const consoleBox = document.getElementById('consoleContainer');
+      const consoleOutput = document.getElementById('consoleOutput');
+      const outputBadge = document.getElementById('outputBadge');
+
+      btn.disabled = true;
+      btn.innerText = 'İcra Olunur...';
+      consoleBox.style.display = 'block';
+      outputBadge.innerText = 'GÖZLƏNİLİR...';
+      consoleOutput.innerText = `[${new Date().toLocaleTimeString()}] "${toolName}" serverə göndərilir...\\nArqumentlər: ` + JSON.stringify(args, null, 2);
+
+      const start = performance.now();
+      try {
+        const res = await fetch('/api/execute-tool', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tool_name: toolName, arguments: args })
+        });
+        const elapsed = Math.round(performance.now() - start);
+        const data = await res.json();
+        
+        if (res.ok && data.status === 'success') {
+          outputBadge.innerText = `UĞURLU (${elapsed} ms)`;
+          outputBadge.style.background = 'rgba(16, 185, 129, 0.15)';
+          outputBadge.style.color = '#10b981';
+          consoleOutput.innerText = JSON.stringify(data.result, null, 2);
+        } else {
+          outputBadge.innerText = `XƏTA (${elapsed} ms)`;
+          outputBadge.style.background = 'rgba(239, 68, 68, 0.15)';
+          outputBadge.style.color = '#ef4444';
+          consoleOutput.innerText = JSON.stringify(data, null, 2);
+        }
+      } catch (err) {
+        outputBadge.innerText = 'ŞƏBƏKƏ XƏTASI';
+        consoleOutput.innerText = 'Server ilə əlaqə qurularkən xəta baş verdi: ' + err.message;
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<span>⚡ Aləti İcra Et</span>';
+      }
+    }
+
+    function copySnippet(btn) {
+      const code = document.getElementById('configSnippet').innerText;
+      navigator.clipboard.writeText(code).then(() => {
+        btn.innerText = 'Kopyalandı!';
+        setTimeout(() => { btn.innerText = 'Kopyala'; }, 2000);
+      });
+    }
+
+    // Initialize inputs
+    onToolSelectChange();
+  </script>
 </body>
 </html>
 """
@@ -520,6 +1154,32 @@ def create_mcp_server(name: str = "codex-gravity-mcp", version: str = "0.1.0") -
                 "call_antigravity_multimodal",
             ],
         })
+
+    @server.custom_route("/api/execute-tool", methods=["POST"])
+    async def execute_tool(request: Any) -> Any:
+        try:
+            body = await request.json()
+            tool_name = body.get("tool_name")
+            arguments = body.get("arguments", {})
+            start_t = asyncio.get_event_loop().time()
+            res = await server.call_tool(tool_name, arguments)
+            latency_ms = round((asyncio.get_event_loop().time() - start_t) * 1000, 1)
+            raw_text = res.content[0].text if res.content else ""
+            try:
+                parsed = json.loads(raw_text)
+            except Exception:
+                parsed = raw_text
+            return JSONResponse({
+                "status": "success",
+                "tool": tool_name,
+                "latency_ms": latency_ms,
+                "result": parsed,
+            })
+        except Exception as e:
+            return JSONResponse({
+                "status": "error",
+                "error": str(e),
+            }, status_code=500)
 
     @server.tool(
         name="antigravity_inspect_media",
