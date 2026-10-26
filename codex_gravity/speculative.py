@@ -9,12 +9,22 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import json
+import os
+from pathlib import Path
 import re
+import shutil
 import textwrap
 import time
 import uuid
 from typing import Any, Callable, Coroutine, Optional, Union
 from pydantic import BaseModel, Field
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 from codex_gravity.event_bus import Event, EventBus, EventType
 
@@ -22,6 +32,117 @@ from codex_gravity.event_bus import Event, EventBus, EventType
 # Official Token Pricing Constants ($ per token)
 P_OPENAI = 2.50 / 1_000_000   # $2.50 / 1M tokens
 P_GEMINI_FLASH = 0.10 / 1_000_000  # $0.10 / 1M tokens
+
+
+def get_antigravity_home() -> Path:
+    return Path(os.environ.get("ANTIGRAVITY_HOME", Path.home() / ".gemini/antigravity"))
+
+
+def find_agentapi_bin() -> Optional[Path]:
+    """Locate the Antigravity CLI, honouring explicit overrides first."""
+    override = os.environ.get("CODEX_GRAVITY_ANTIGRAVITY_CLI_BIN") or os.environ.get("ANTIGRAVITY_CLI_BIN")
+    if override:
+        candidate = Path(override).expanduser()
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+        return None
+    home = get_antigravity_home()
+    candidates = [
+        home / "bin/agentapi",
+        Path.home() / ".gemini/antigravity/bin/agentapi",
+        Path("/opt/Antigravity/resources/bin/language_server"),
+    ]
+    for c in candidates:
+        if c.exists() and os.access(c, os.X_OK):
+            return c
+    which = shutil.which("agentapi") or shutil.which("agy")
+    return Path(which) if which else None
+
+
+def get_gemini_client() -> Optional[Any]:
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        return None
+    try:
+        from google import genai
+        return genai.Client(api_key=api_key)
+    except Exception:
+        return None
+
+
+async def call_agentapi(
+    prompt: str,
+    model: str = "flash",
+    timeout_sec: float = 35.0,
+    binary: Optional[Path] = None,
+) -> Optional[str]:
+    agentapi_bin = binary or find_agentapi_bin()
+    if not agentapi_bin:
+        return None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            str(agentapi_bin),
+            "new-conversation",
+            f"--model={model}",
+            prompt,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+        if proc.returncode != 0:
+            return None
+        data = json.loads(stdout.decode("utf-8", errors="replace"))
+        conv_id = data.get("response", {}).get("newConversation", {}).get("conversationId")
+        if not conv_id:
+            return None
+        transcript_file = get_antigravity_home() / f"brain/{conv_id}/.system_generated/logs/transcript.jsonl"
+        start_time = asyncio.get_event_loop().time()
+        while asyncio.get_event_loop().time() - start_time < timeout_sec:
+            if transcript_file.exists():
+                try:
+                    lines = transcript_file.read_text(encoding="utf-8", errors="replace").strip().splitlines()
+                    for line in reversed(lines):
+                        if not line.strip():
+                            continue
+                        entry = json.loads(line)
+                        if entry.get("type") == "PLANNER_RESPONSE" and entry.get("content"):
+                            return entry.get("content")
+                except Exception:
+                    pass
+            await asyncio.sleep(0.5)
+    except Exception:
+        pass
+    return None
+
+
+async def call_openai_chat(prompt: str, model: str = "gpt-4o-mini", timeout_sec: float = 35.0) -> Optional[str]:
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        return None
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=timeout_sec) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": "You are Codex, an expert code synthesizer. Output only code."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0.2,
+                },
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                return data["choices"][0]["message"]["content"]
+    except Exception:
+        pass
+    return None
 
 
 class AnchorTarget(BaseModel):
@@ -45,6 +166,9 @@ class DraftSkeleton(BaseModel):
     raw_tokens_estimate: int = 1500
     flash_tokens_used: int = 400
     generation_time_ms: float = 380.0
+    is_mock: bool = False
+    provider: str = "gemini-3.8-flash"
+    engine: str = "speculative-flash"
 
 
 class CodexPatch(BaseModel):
@@ -62,6 +186,12 @@ class TokenArbitrageResult(BaseModel):
     dollars_saved: float
     savings_percentage: float
     generation_time_ms: float
+    is_mock: bool = False
+    # Token counts here are derived from character counts and fixed templates,
+    # not from provider usage metadata, so every figure is an estimate.
+    estimated: bool = True
+    provider: str = "speculative-hybrid"
+    engine: str = "gemini-flash+codex"
 
     @classmethod
     def calculate(
@@ -70,6 +200,10 @@ class TokenArbitrageResult(BaseModel):
         flash_tokens: int,
         codex_tokens: int,
         generation_time_ms: float,
+        is_mock: bool = False,
+        provider: str = "speculative-hybrid",
+        engine: str = "gemini-flash+codex",
+        estimated: bool = True,
     ) -> TokenArbitrageResult:
         baseline_cost = raw_tokens * P_OPENAI
         hybrid_cost = (flash_tokens * P_GEMINI_FLASH) + (codex_tokens * P_OPENAI)
@@ -85,6 +219,10 @@ class TokenArbitrageResult(BaseModel):
             dollars_saved=round(saved, 6),
             savings_percentage=round(pct, 2),
             generation_time_ms=round(generation_time_ms, 2),
+            is_mock=is_mock,
+            estimated=estimated,
+            provider=provider,
+            engine=engine,
         )
 
 
@@ -121,14 +259,20 @@ class SpeculativeDraftingPipeline:
         skeleton.generation_time_ms = duration_ms
 
         if self.event_bus:
+            if skeleton.is_mock:
+                dialogue_msg = f"[MOCK MODE] Draft skeleton generated for '{file_path}' in {duration_ms:.1f}ms with {len(skeleton.anchors)} anchor targets (API keys absent)."
+            else:
+                dialogue_msg = f"Flash skeleton generated for '{file_path}' via {skeleton.provider} ({skeleton.engine}) in {duration_ms:.1f}ms with {len(skeleton.anchors)} anchor targets. Handing off to Codex for core logic."
             await self.event_bus.send_dialogue(
                 sender="antigravity",
                 recipient="codex",
-                message=f"Flash skeleton generated for '{file_path}' in {duration_ms:.1f}ms with {len(skeleton.anchors)} anchor targets. Handing off to Codex for core logic.",
+                message=dialogue_msg,
                 payload={
                     "file_path": file_path,
                     "anchors_count": len(skeleton.anchors),
                     "flash_tokens": skeleton.flash_tokens_used,
+                    "is_mock": skeleton.is_mock,
+                    "provider": skeleton.provider,
                 },
             )
 
@@ -143,11 +287,12 @@ class SpeculativeDraftingPipeline:
         """
         start = time.perf_counter()
         if self.event_bus:
+            mode_prefix = "[MOCK MODE] " if skeleton.is_mock else ""
             await self.event_bus.send_dialogue(
                 sender="codex",
                 recipient="antigravity",
-                message=f"Received skeleton for '{skeleton.file_path}'. Synthesizing algorithmic core logic for {len(skeleton.anchors)} anchors.",
-                payload={"file_path": skeleton.file_path},
+                message=f"{mode_prefix}Received skeleton for '{skeleton.file_path}'. Synthesizing algorithmic core logic for {len(skeleton.anchors)} anchors.",
+                payload={"file_path": skeleton.file_path, "is_mock": skeleton.is_mock},
             )
 
         res = self.codex_completer(skeleton)
@@ -177,15 +322,19 @@ class SpeculativeDraftingPipeline:
             flash_tokens=skeleton.flash_tokens_used,
             codex_tokens=total_codex_tokens,
             generation_time_ms=total_time_ms,
+            is_mock=skeleton.is_mock,
+            provider="mock-template" if skeleton.is_mock else "speculative-hybrid",
+            engine="offline-deterministic" if skeleton.is_mock else "gemini-flash+codex",
         )
 
         if self.event_bus:
+            status_desc = "[MOCK MODE] Core logic synthesized using offline templates" if skeleton.is_mock else "Core logic synthesized and stitched"
             await self.event_bus.publish(
                 Event(
                     event_type=EventType.SPECULATIVE_PATCH,
                     sender="codex",
                     recipient="antigravity",
-                    message=f"Core logic synthesized and stitched for '{skeleton.file_path}'. Saved {arbitrage.savings_percentage}% tokens.",
+                    message=f"{status_desc} for '{skeleton.file_path}'. Saved {arbitrage.savings_percentage}% tokens.",
                     payload=arbitrage.model_dump(),
                 )
             )
@@ -231,6 +380,28 @@ class SpeculativeDraftingPipeline:
 
             dedented_replacement = textwrap.dedent(replacement).strip()
 
+            # Handle multiline target patterns
+            if "\n" in target_pattern:
+                idx = code.find(target_pattern)
+                if idx != -1:
+                    line_start = code.rfind("\n", 0, idx)
+                    line_start = 0 if line_start == -1 else line_start + 1
+                    indent = re.match(r"^(\s*)", code[line_start:idx]).group(1)
+                    line_uses_tabs = "\t" in indent or (not indent and uses_tabs)
+                    indented_repl_lines = []
+                    for i, r_line in enumerate(dedented_replacement.splitlines()):
+                        if r_line.strip():
+                            r_line_clean = r_line.replace("    ", "\t") if line_uses_tabs else r_line.replace("\t", "    ")
+                            if i == 0:
+                                indented_repl_lines.append(r_line_clean)
+                            else:
+                                indented_repl_lines.append(f"{indent}{r_line_clean}")
+                        else:
+                            indented_repl_lines.append("")
+                    new_repl = "\n".join(indented_repl_lines)
+                    code = code[:idx] + new_repl + code[idx + len(target_pattern):]
+                    continue
+
             lines = code.splitlines(keepends=True)
             new_lines = []
             replaced_for_this_anchor = False
@@ -271,22 +442,106 @@ class SpeculativeDraftingPipeline:
         return code
 
     @staticmethod
-    def _default_flash_generator(
+    async def _default_flash_generator(
         task_description: str,
         file_path: str,
         language: str,
         context: str,
     ) -> DraftSkeleton:
         """
-        Built-in intelligent draft skeleton generator.
-        Generates standard type declarations, docstrings, imports, and AST anchors.
+        Intelligent draft skeleton generator. Uses real Gemini or agentapi if available,
+        otherwise generates transparently-labeled offline mock template.
         """
         anchor_id = f"anchor-{uuid.uuid4().hex[:6]}"
         is_python = language.lower() in ("python", "py")
+        placeholder = "# TODO(codex_core_logic): implement business logic" if is_python else "// TODO(codex_core_logic): implement business logic"
 
+        # 1. Real Gemini generation if GEMINI_API_KEY / GOOGLE_API_KEY present
+        client = get_gemini_client()
+        if client:
+            try:
+                model_name = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+                prompt = (
+                    f"You are Gemini Flash in the Codex-Gravity speculative pipeline.\n"
+                    f"Generate a code draft skeleton for target file: '{file_path}' in language '{language}'.\n"
+                    f"Task: {task_description}\n"
+                    f"Context: {context}\n\n"
+                    f"Requirements:\n"
+                    f"1. Generate type declarations, interfaces/models, imports, and docstrings.\n"
+                    f"2. Leave the core business logic uncompleted with this EXACT placeholder anchor on its own line:\n"
+                    f"   {placeholder}\n"
+                    f"3. Return ONLY raw source code without markdown fences."
+                )
+                res = client.models.generate_content(model=model_name, contents=prompt)
+                raw_text = res.text.strip()
+                clean_code = re.sub(r"^```[a-zA-Z]*\n", "", raw_text)
+                clean_code = re.sub(r"\n```$", "", clean_code)
+                if placeholder in clean_code:
+                    return DraftSkeleton(
+                        file_path=file_path,
+                        language=language,
+                        skeleton_code=clean_code,
+                        anchors=[
+                            AnchorTarget(
+                                anchor_id=anchor_id,
+                                target_type="function",
+                                signature="business_logic",
+                                placeholder=placeholder,
+                                context_hint=task_description,
+                            )
+                        ],
+                        raw_tokens_estimate=max(200, len(clean_code) // 3),
+                        flash_tokens_used=max(50, len(prompt) // 4),
+                        generation_time_ms=350.0,
+                        is_mock=False,
+                        provider="google-gemini-live",
+                        engine=model_name,
+                    )
+            except Exception:
+                pass
+
+        # 2. Native Google Antigravity execution via local agentapi if available
+        agentapi_bin = find_agentapi_bin()
+        if agentapi_bin:
+            prompt = (
+                f"Generate a code draft skeleton for target file: '{file_path}' in language '{language}'.\n"
+                f"Task: {task_description}\n"
+                f"Include this exact placeholder anchor comment on its own line: {placeholder}\n"
+                f"Return ONLY valid source code."
+            )
+            raw_text = await call_agentapi(prompt, model="flash", timeout_sec=10.0)
+            if raw_text and placeholder in raw_text:
+                clean_code = re.sub(r"^```[a-zA-Z]*\n", "", raw_text.strip())
+                clean_code = re.sub(r"\n```$", "", clean_code)
+                return DraftSkeleton(
+                    file_path=file_path,
+                    language=language,
+                    skeleton_code=clean_code,
+                    anchors=[
+                        AnchorTarget(
+                            anchor_id=anchor_id,
+                            target_type="function",
+                            signature="business_logic",
+                            placeholder=placeholder,
+                            context_hint=task_description,
+                        )
+                    ],
+                    raw_tokens_estimate=max(200, len(clean_code) // 3),
+                    flash_tokens_used=250,
+                    generation_time_ms=300.0,
+                    is_mock=False,
+                    provider="google-antigravity-native",
+                    engine="agentapi",
+                )
+
+        # 3. Transparent mock fallback when API keys are absent
+        mock_banner = (
+            "# [MOCK GENERATION: No GEMINI_API_KEY / OPENAI_API_KEY configured - running in offline mock mode]\n"
+            if is_python else
+            "// [MOCK GENERATION: No GEMINI_API_KEY / OPENAI_API_KEY configured - running in offline mock mode]\n"
+        )
         if is_python:
-            placeholder = "# TODO(codex_core_logic): implement business logic"
-            skeleton_code = f'''"""
+            skeleton_code = f'''{mock_banner}"""
 Module: {file_path}
 Task: {task_description}
 """
@@ -323,8 +578,7 @@ def execute_operation(request: OperationRequest) -> OperationResponse:
                 )
             ]
         else:
-            placeholder = "// TODO(codex_core_logic): implement business logic"
-            skeleton_code = f'''/**
+            skeleton_code = f'''{mock_banner}/**
  * Module: {file_path}
  * Task: {task_description}
  */
@@ -362,19 +616,76 @@ export async function executeOperation(request: OperationRequest): Promise<Opera
             raw_tokens_estimate=1200,
             flash_tokens_used=280,
             generation_time_ms=320.0,
+            is_mock=True,
+            provider="mock-template-generator",
+            engine="offline-deterministic",
         )
 
     @staticmethod
-    def _default_codex_completer(skeleton: DraftSkeleton) -> list[CodexPatch]:
+    async def _default_codex_completer(skeleton: DraftSkeleton) -> list[CodexPatch]:
         """
-        Built-in intelligent logic synthesizer for anchors.
+        Intelligent logic synthesizer for anchors. Uses real OpenAI/Gemini if available,
+        otherwise returns transparently-labeled offline mock template patches.
         """
         patches = []
         is_python = skeleton.language.lower() in ("python", "py")
 
+        # 1. Real OpenAI Codex execution if OPENAI_API_KEY is available
+        if os.environ.get("OPENAI_API_KEY"):
+            for anchor in skeleton.anchors:
+                prompt = (
+                    f"You are OpenAI Codex. Synthesize the core logic for placeholder '{anchor.placeholder}' in '{skeleton.file_path}'.\n"
+                    f"Signature: {anchor.signature}\n"
+                    f"Context hint: {anchor.context_hint}\n"
+                    f"Skeleton:\n{skeleton.skeleton_code}\n\n"
+                    f"Return ONLY valid replacement code for the placeholder, no markdown fences."
+                )
+                openai_res = await call_openai_chat(prompt)
+                if openai_res:
+                    clean_res = re.sub(r"^```[a-zA-Z]*\n", "", openai_res.strip())
+                    clean_res = re.sub(r"\n```$", "", clean_res)
+                    patches.append(
+                        CodexPatch(
+                            anchor_id=anchor.anchor_id,
+                            replacement_code=clean_res,
+                            codex_tokens_used=max(50, len(clean_res) // 3),
+                        )
+                    )
+            if patches:
+                return patches
+
+        # 2. Real Gemini execution for anchors if GEMINI_API_KEY is available
+        client = get_gemini_client()
+        if client:
+            model_name = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+            for anchor in skeleton.anchors:
+                try:
+                    prompt = (
+                        f"Synthesize the logic replacing placeholder '{anchor.placeholder}' in file '{skeleton.file_path}'.\n"
+                        f"Signature: {anchor.signature}\n"
+                        f"Context: {anchor.context_hint}\n"
+                        f"Return ONLY the replacement code lines without markdown."
+                    )
+                    res = client.models.generate_content(model=model_name, contents=prompt)
+                    clean_res = re.sub(r"^```[a-zA-Z]*\n", "", res.text.strip())
+                    clean_res = re.sub(r"\n```$", "", clean_res)
+                    patches.append(
+                        CodexPatch(
+                            anchor_id=anchor.anchor_id,
+                            replacement_code=clean_res,
+                            codex_tokens_used=max(50, len(clean_res) // 3),
+                        )
+                    )
+                except Exception:
+                    pass
+            if patches:
+                return patches
+
+        # 3. Transparent mock fallback when API keys are absent
         for anchor in skeleton.anchors:
             if is_python:
                 code = (
+                    "# [MOCK MODE: Template logic synthesis - configure OPENAI_API_KEY or GEMINI_API_KEY for live models]\n"
                     "# Codex verified logic implementation\n"
                     "processed_query = request.query.strip().lower()\n"
                     "result_payload = {'query': processed_query, 'processed': True, 'keys': list(request.metadata.keys())}\n"
@@ -382,6 +693,7 @@ export async function executeOperation(request: OperationRequest): Promise<Opera
                 )
             else:
                 code = (
+                    "// [MOCK MODE: Template logic synthesis - configure OPENAI_API_KEY or GEMINI_API_KEY for live models]\n"
                     "// Codex verified logic implementation\n"
                     "const processedQuery = request.query.trim().toLowerCase();\n"
                     "return { success: true, data: { query: processedQuery, processed: true } };"

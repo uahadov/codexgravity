@@ -190,6 +190,19 @@ class SandboxManager:
 
         self.sandbox_base.mkdir(parents=True, exist_ok=True)
 
+        # Ensure .shadow_sandbox is excluded from git operations in repo_root
+        git_dir = self.repo_root / ".git"
+        info_dir = git_dir / "info" if git_dir.is_dir() else None
+        if info_dir and info_dir.exists():
+            exclude_file = info_dir / "exclude"
+            try:
+                content = exclude_file.read_text(encoding="utf-8") if exclude_file.exists() else ""
+                if ".shadow_sandbox" not in content:
+                    sep = "\n" if content and not content.endswith("\n") else ""
+                    exclude_file.write_text(content + sep + ".shadow_sandbox/\n", encoding="utf-8")
+            except Exception:
+                pass
+
         # Check git head exists
         check_head = await self._run_git(["rev-parse", "--verify", "HEAD"], cwd=self.repo_root)
         if not check_head.success:
@@ -383,37 +396,65 @@ class SandboxManager:
         target = target_branch or self.base_branch
         await self.state_lock.transition(LockState.MERGING)
 
-        # Ensure repo_root has no dirty uncommitted changes
+        # 1. Record the active branch or commit ref before switching
+        branch_res = await self._run_git(["branch", "--show-current"], cwd=self.repo_root)
+        original_branch = branch_res.stdout.strip()
+        original_ref = original_branch
+        if not original_ref:
+            rev_res = await self._run_git(["rev-parse", "HEAD"], cwd=self.repo_root)
+            if rev_res.success:
+                original_ref = rev_res.stdout.strip()
+
+        # 2. Check for uncommitted changes in repo_root and stash cleanly
+        stashed = False
         dirty_check = await self._run_git(["status", "--porcelain"], cwd=self.repo_root)
-        if dirty_check.stdout.strip():
-            dirty_lines = [l for l in dirty_check.stdout.splitlines() if ".shadow_sandbox" not in l]
-            if dirty_lines:
+        dirty_lines = [line for line in dirty_check.stdout.splitlines() if ".shadow_sandbox" not in line]
+        if dirty_lines:
+            stash_res = await self._run_git(
+                ["stash", "push", "--include-untracked", "-m", f"codex_gravity_pre_merge_{self.task_id}"],
+                cwd=self.repo_root,
+            )
+            if stash_res.success and "No local changes to save" not in stash_res.stdout:
+                stashed = True
+            elif not stash_res.success:
                 await self.state_lock.transition(LockState.FAILED)
                 raise RuntimeError(
-                    f"Cannot merge: Main repository at '{self.repo_root}' has dirty/uncommitted changes:\n"
-                    + "\n".join(dirty_lines[:5])
+                    f"Cannot merge: Failed to stash uncommitted changes in '{self.repo_root}': {stash_res.stderr}"
                 )
 
-        # First commit any uncommitted changes in sandbox
-        await self.commit_changes("chore: finalize verified sandbox changes")
+        try:
+            # First commit any uncommitted changes in sandbox
+            await self.commit_changes("chore: finalize verified sandbox changes")
 
-        # Checkout target branch in repo_root
-        co_res = await self._run_git(["checkout", target], cwd=self.repo_root)
-        if not co_res.success:
-            await self.state_lock.transition(LockState.FAILED)
-            raise RuntimeError(f"Failed to checkout {target}: {co_res.stderr}")
+            # Checkout target branch in repo_root if not already on it
+            curr_res = await self._run_git(["branch", "--show-current"], cwd=self.repo_root)
+            if curr_res.stdout.strip() != target:
+                co_res = await self._run_git(["checkout", target], cwd=self.repo_root)
+                if not co_res.success:
+                    await self.state_lock.transition(LockState.FAILED)
+                    raise RuntimeError(f"Failed to checkout {target}: {co_res.stderr}")
 
-        # Attempt merge
-        merge_cmd = ["merge", "--ff-only", self.branch_name] if ff_only else ["merge", "-m", f"Merge {self.branch_name}", self.branch_name]
-        merge_res = await self._run_git(merge_cmd, cwd=self.repo_root)
-        if not merge_res.success:
-            await self.state_lock.transition(LockState.FAILED)
-            await self._run_git(["merge", "--abort"], cwd=self.repo_root)
-            raise RuntimeError(f"Failed to merge {self.branch_name} into {target}: {merge_res.stderr}")
+            # Attempt merge
+            merge_cmd = ["merge", "--ff-only", self.branch_name] if ff_only else ["merge", "-m", f"Merge {self.branch_name}", self.branch_name]
+            merge_res = await self._run_git(merge_cmd, cwd=self.repo_root)
+            if not merge_res.success:
+                await self.state_lock.transition(LockState.FAILED)
+                await self._run_git(["merge", "--abort"], cwd=self.repo_root)
+                raise RuntimeError(f"Failed to merge {self.branch_name} into {target}: {merge_res.stderr}")
 
-        self.is_merged = True
-        await self.state_lock.transition(LockState.COMPLETED)
-        return True
+            self.is_merged = True
+            await self.state_lock.transition(LockState.COMPLETED)
+            return True
+        finally:
+            # Restore active branch / ref prior to merge
+            if original_ref:
+                curr_branch = (await self._run_git(["branch", "--show-current"], cwd=self.repo_root)).stdout.strip()
+                if curr_branch != original_ref:
+                    await self._run_git(["checkout", original_ref], cwd=self.repo_root)
+
+            # Restore stashed changes cleanly
+            if stashed:
+                await self._run_git(["stash", "pop"], cwd=self.repo_root)
 
     async def cleanup(self, delete_branch: bool = True) -> None:
         """

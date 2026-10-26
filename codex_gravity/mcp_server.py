@@ -12,22 +12,87 @@ import json
 import mimetypes
 import os
 import re
+import secrets
+import shlex
 import signal
+import sys
 import urllib.parse
+from importlib.metadata import PackageNotFoundError, version as _package_version
 from pathlib import Path
 from typing import Any, Optional
 
 from dotenv import load_dotenv
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import MCPServer, Context
 from starlette.responses import HTMLResponse, JSONResponse
 
-from codex_gravity.event_bus import Event, EventBus, EventType
+from codex_gravity.event_bus import EventBus
+from codex_gravity.codex_bridge import BridgeError, DesktopCodex, run_codex_architect
+from codex_gravity.codex_gui import (
+    CodexDesktopChat,
+    CodexDesktopUnavailable,
+    desktop_availability,
+    reply_to_dict,
+    snapshot_to_dict,
+)
+from codex_gravity.completion import CompletionWatches
 from codex_gravity.router import RoutingMode, SmartRouter, TaskRequest
+from codex_gravity.team.agents import default_agents
+from codex_gravity.team.protocol import TeamError
+from codex_gravity.team.session import TeamConfig, TeamOrchestrator
 from codex_gravity.verifier import RootCauseAnalyzer, VisualRegressionInspector
 
 # Shared EventBus and SmartRouter instances for Studio Cockpit
 _shared_event_bus = EventBus()
 _shared_router = SmartRouter(event_bus=_shared_event_bus)
+
+# The studio routes run shell commands and mutate the project, so they are
+# authenticated. The token is per-process (or operator-supplied) and is injected
+# into the dashboard page, which a cross-origin page cannot read.
+_PROCESS_STUDIO_TOKEN = secrets.token_urlsafe(32)
+STUDIO_HEADER = "x-codex-gravity-token"
+
+
+def studio_token() -> str:
+    """Token required by the mutating Studio HTTP routes."""
+    return os.environ.get("CODEX_GRAVITY_STUDIO_TOKEN") or _PROCESS_STUDIO_TOKEN
+
+
+def studio_tool_allowlist() -> Optional[set[str]]:
+    """Optional comma-separated allowlist restricting /api/execute-tool."""
+    raw = os.environ.get("CODEX_GRAVITY_STUDIO_TOOLS", "").strip()
+    return {name.strip() for name in raw.split(",") if name.strip()} or None
+
+
+def _studio_denied(request: Any, tool_name: Optional[str] = None) -> Optional[JSONResponse]:
+    """
+    Gate for routes that execute shell commands or mutate project files.
+
+    The dashboard is served with the token inlined so a browser tab can use it;
+    cross-origin pages cannot read that document, so they cannot replay it.
+    """
+    supplied = request.headers.get(STUDIO_HEADER, "")
+    if not secrets.compare_digest(supplied, studio_token()):
+        return JSONResponse(
+            {
+                "status": "error",
+                "error": (
+                    f"Missing or invalid {STUDIO_HEADER}. Open http://127.0.0.1:<port>/ so the "
+                    "dashboard can use its injected token, or send "
+                    "CODEX_GRAVITY_STUDIO_TOKEN for scripted calls. No command was executed."
+                ),
+            },
+            status_code=403,
+        )
+    allowed = studio_tool_allowlist()
+    if allowed is not None and (tool_name is None or tool_name not in allowed):
+        return JSONResponse(
+            {
+                "status": "error",
+                "error": f"Tool '{tool_name}' is not in CODEX_GRAVITY_STUDIO_TOOLS. No command was executed.",
+            },
+            status_code=403,
+        )
+    return None
 
 # Load environment variables (.env) if present
 _env_path = Path(__file__).resolve().parent.parent / ".env"
@@ -79,8 +144,9 @@ async def call_native_antigravity(
     Google Antigravity subscription via the official language_server / agentapi binary.
     No external API keys or cloud billing needed.
     """
+    antigravity_home = Path(os.environ.get("ANTIGRAVITY_HOME", Path.home() / ".gemini/antigravity"))
     agentapi_candidates = [
-        Path("/home/ua/.gemini/antigravity/bin/agentapi"),
+        antigravity_home / "bin/agentapi",
         Path.home() / ".gemini/antigravity/bin/agentapi",
         Path("/opt/Antigravity/resources/bin/language_server"),
     ]
@@ -123,7 +189,7 @@ async def call_native_antigravity(
         if not conv_id:
             return None
 
-        transcript_file = Path(f"/home/ua/.gemini/antigravity/brain/{conv_id}/.system_generated/logs/transcript.jsonl")
+        transcript_file = antigravity_home / f"brain/{conv_id}/.system_generated/logs/transcript.jsonl"
 
         start_time = asyncio.get_event_loop().time()
         while asyncio.get_event_loop().time() - start_time < timeout_sec:
@@ -182,37 +248,35 @@ async def _inspect_media_with_gemini_or_probe(
     mime, _ = mimetypes.guess_type(str(file_path))
 
     # 2. Check for native Google Antigravity subscription execution (agentapi)
-    if not os.environ.get("PYTEST_CURRENT_TEST"):
-        agy_analysis = await call_native_antigravity(
-            prompt=focus_query or instruction or "Describe key visual events and detailed breakdown",
-            media_file_path=file_path,
-            model="flash",
-            timeout_sec=35.0,
-        )
-        if agy_analysis:
-            return {
-                "status": "success",
-                "provider": "gemini-3.8-flash",
-                "engine": "google-antigravity-subscription (native agentapi)",
-                "file_path": str(file_path),
-                "size_bytes": size_bytes,
-                "mime_type": mime or "application/octet-stream",
-                "duration_seconds": duration_sec,
-                "analysis": agy_analysis,
-                "timestamps": [
-                    {"time": "00:00:00", "event": "Stream initialized / Antigravity multimodal visual analysis complete", "confidence": 0.99},
-                    {"time": f"00:00:{int(min(duration_sec, 5.0)):02d}", "event": f"Visual observation marker: {focus_query or instruction or 'content analysis'}", "confidence": 0.98},
-                ],
-                "technical_streams": [
-                    {
-                        "codec_type": s.get("codec_type"),
-                        "codec_name": s.get("codec_name"),
-                        "width": s.get("width"),
-                        "height": s.get("height"),
-                    }
-                    for s in streams
-                ],
-            }
+    agy_analysis = await call_native_antigravity(
+        prompt=focus_query or instruction or "Describe key visual events and detailed breakdown",
+        media_file_path=file_path,
+        model="flash",
+        timeout_sec=35.0,
+    )
+    if agy_analysis:
+        return {
+            "status": "success",
+            "provider": "gemini-3.8-flash",
+            "engine": "google-antigravity-subscription (native agentapi)",
+            "analysis_available": True,
+            "file_path": str(file_path),
+            "size_bytes": size_bytes,
+            "mime_type": mime or "application/octet-stream",
+            "duration_seconds": duration_sec,
+            "analysis": agy_analysis,
+            # No transcript/timestamps are produced by this path, so none are invented.
+            "timestamps": [],
+            "technical_streams": [
+                {
+                    "codec_type": s.get("codec_type"),
+                    "codec_name": s.get("codec_name"),
+                    "width": s.get("width"),
+                    "height": s.get("height"),
+                }
+                for s in streams
+            ],
+        }
 
     # 3. Check for external Gemini API client if configured
     client = get_gemini_client()
@@ -242,15 +306,14 @@ async def _inspect_media_with_gemini_or_probe(
                 "status": "success",
                 "provider": "gemini-3.8-flash",
                 "engine": f"google-gemini-live ({model_name})",
+                "analysis_available": True,
                 "file_path": str(file_path),
                 "size_bytes": size_bytes,
                 "mime_type": mime or "application/octet-stream",
                 "duration_seconds": duration_sec,
                 "analysis": response.text,
-                "timestamps": [
-                    {"time": "00:00:00", "event": "Stream initialized / Gemini multimodal analysis complete", "confidence": 0.99},
-                    {"time": f"00:00:{int(min(duration_sec, 5.0)):02d}", "event": f"Inspection marker: {focus_query or instruction or 'content analysis'}", "confidence": 0.95},
-                ],
+                # This path returns prose only; no timestamps are invented.
+                "timestamps": [],
                 "technical_streams": [
                     {
                         "codec_type": s.get("codec_type"),
@@ -274,19 +337,20 @@ async def _inspect_media_with_gemini_or_probe(
                 "fallback_technical_metadata": format_info,
             }
 
-    # 4. Dynamic local technical analysis via ffprobe
+    # 4. No model answered: report container/stream metadata only, and say so.
     technical_summary = (
         f"Media probed via ffprobe: duration={duration_sec:.2f}s, format={format_info.get('format_name', 'unknown')}, "
         f"streams={len(streams)}. Query focus: '{focus_query or instruction}'."
     )
     return {
-        "status": "success",
-        "provider": "gemini-3.8-flash",
-        "engine": "google-antigravity-subscription (ffprobe-local-engine)",
-        "gemini_connection_status": "ACTIVE_SUBSCRIPTION",
+        "status": "partial",
+        "provider": "ffprobe",
+        "engine": "ffprobe-local-metadata",
+        "analysis_available": False,
         "notice": (
-            "Connected directly to Google Antigravity subscription. "
-            "Real local media parsing completed successfully via ffprobe and Antigravity agentapi."
+            "No model analysed this file: neither the Antigravity agentapi binary nor a "
+            "GEMINI_API_KEY / GOOGLE_API_KEY is available. Only container and stream "
+            "metadata were read; there is no visual or audio understanding in this result."
         ),
         "file_path": str(file_path),
         "size_bytes": size_bytes,
@@ -294,10 +358,7 @@ async def _inspect_media_with_gemini_or_probe(
         "duration_seconds": duration_sec,
         "format_name": format_info.get("format_long_name", "unknown"),
         "analysis": technical_summary,
-        "timestamps": [
-            {"time": "00:00:00", "event": "Container initialized / Stream header parsed", "confidence": 0.99},
-            {"time": f"00:00:{int(min(duration_sec, 1.0)):02d}", "event": f"Inspection marker for query: {focus_query or instruction or 'media start'}", "confidence": 0.95},
-        ],
+        "timestamps": [],
         "streams": [
             {
                 "codec_type": s.get("codec_type"),
@@ -340,7 +401,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    
+
     body {
       background: var(--bg);
       color: var(--text);
@@ -885,55 +946,41 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
       <!-- 4-Stage Execution Stepper -->
       <section class="stepper">
-        <div class="step-node done" id="step1">
-          <span>✔</span>
-          <div>1. Flash Skeleton <span style="font-size: 10px; opacity: 0.7;">(&lt;400ms)</span></div>
+        <div class="step-node" id="step1">
+          <span>•</span>
+          <div>1. Flash Skeleton</div>
         </div>
-        <div class="step-node done" id="step2">
-          <span>✔</span>
+        <div class="step-node" id="step2">
+          <span>•</span>
           <div>2. Codex Core Logic</div>
         </div>
-        <div class="step-node done" id="step3">
-          <span>✔</span>
-          <div>3. Multi-Viewport Test</div>
+        <div class="step-node" id="step3">
+          <span>•</span>
+          <div>3. Yoxlama (terminal)</div>
         </div>
-        <div class="step-node done" id="step4">
-          <span>✔</span>
-          <div>4. Atomic Merge to Main</div>
+        <div class="step-node" id="step4">
+          <span>•</span>
+          <div>4. Merge (yalnız PASS)</div>
         </div>
       </section>
 
       <!-- Two-Column Split Workspace -->
       <section class="split-grid">
-        
+
         <!-- Left Column: Canlı Agent Walkie-Talkie -->
         <div class="panel-card">
           <div class="panel-header">
             <span class="panel-title">📻 CANLI AGENT "WALKIE-TALKIE" (Backchannel)</span>
             <span style="font-size: 11px; color: var(--accent); font-family: ui-monospace;">EVENT_BUS ACTIVE</span>
           </div>
-          
+
           <div class="chat-stream" id="chatStream">
-            <div class="chat-msg">
+            <div class="chat-msg" id="chatEmpty">
               <div class="chat-meta">
                 <span class="chat-sender">[ROUTER ➜ ALL]</span>
-                <span class="chat-time">01:45:00</span>
+                <span class="chat-time">—</span>
               </div>
-              <div class="chat-text">Sistem hazır vəziyyətdədir. Transactional State Lock aktivləşdirildi.</div>
-            </div>
-            <div class="chat-msg">
-              <div class="chat-meta">
-                <span class="chat-sender">[ANTIGRAVITY ➜ CODEX]</span>
-                <span class="chat-time">01:45:02</span>
-              </div>
-              <div class="chat-text">Flash skeleton hazırlandı: <code>auth_service.py</code> tipləri və AST anchorları generasiya edildi.</div>
-            </div>
-            <div class="chat-msg">
-              <div class="chat-meta">
-                <span class="chat-sender">[CODEX ➜ ANTIGRAVITY]</span>
-                <span class="chat-time">01:45:03</span>
-              </div>
-              <div class="chat-text">Skeleton qəbul edildi. Şifrələmə və JWT generasiya məntiqi sintez edilir.</div>
+              <div class="chat-text">Hələ hadisə qeydə alınmayıb. Tapşırıq icra olunanda agent dialoqu burada canlı görünəcək.</div>
             </div>
           </div>
 
@@ -947,59 +994,48 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <div class="panel-card">
           <div class="panel-header">
             <span class="panel-title">💻 KOD VƏ SPEKULYATİV PATCH (Live Diff)</span>
-            <span style="font-size: 11px; color: var(--green); font-family: ui-monospace;">SANDBOX PASS</span>
+            <span style="font-size: 11px; color: var(--text-muted); font-family: ui-monospace;" id="sandboxState">GÖZLƏNİLİR</span>
           </div>
 
-          <div class="diff-box" id="diffBox">+ export interface AuthResponse {
-+   token: string;
-+   expiresIn: number;
-+   user: { id: string; role: string; };
-+ }
-+
-+ export async function authenticate(credentials: LoginDTO): Promise&lt;AuthResponse&gt; {
-+   // Codex o3-mini Algorithmic Business Logic
-+   const isValid = await verifyHash(credentials.password, credentials.hash);
-+   if (!isValid) throw new UnauthorizedException("Invalid token signature");
-+   return generateTokenPayload(credentials.userId);
-+ }</div>
+          <div class="diff-box" id="diffBox">Hələ kod generasiya olunmayıb. Tapşırıq icra olunanda nəticə burada görünəcək.</div>
 
           <div class="visual-strip">
             <div class="viewport-box">
               <div class="vp-label">📱 Mobile (375x667)</div>
-              <div class="vp-status">✔ Pixel Perfect (0 overflow)</div>
+              <div class="vp-status" id="vpMobile" style="color: var(--text-muted);">Ölçülməyib</div>
             </div>
             <div class="viewport-box">
               <div class="vp-label">💻 Desktop (1920x1080)</div>
-              <div class="vp-status">✔ Layout Verified</div>
+              <div class="vp-status" id="vpDesktop" style="color: var(--text-muted);">Ölçülməyib</div>
             </div>
             <div class="viewport-box">
               <div class="vp-label">🌿 Main Repo</div>
-              <div class="vp-status" style="color: var(--accent);">Təmiz (Protected)</div>
+              <div class="vp-status" style="color: var(--accent);">Qorunur</div>
             </div>
           </div>
         </div>
 
       </section>
 
-      <!-- Bottom Section: Real-Vaxt Token & Xərc Arbitraj Sayğacı -->
+      <!-- Bottom Section: Token & Xərc Qənaəti (təxmini) -->
       <section class="arbitrage-card">
-        <div class="arb-title">📊 REAL-VAXT TOKEN & XƏRC SAYĞACI (Arbitrage Ledger)</div>
+        <div class="arb-title">📊 TOKEN &amp; XƏRC QƏNAƏTİ — TƏXMİNİ (provayder istifadə metrikası deyil)</div>
         <div class="arb-grid">
           <div class="arb-metric">
-            <div class="arb-label">Flash ilə Emal Olunan</div>
-            <div class="arb-val" id="valFlashTokens">1,240,000 <span style="font-size: 12px; color: var(--text-muted);">token</span></div>
+            <div class="arb-label">Flash ilə Emal Olunan (təxmini)</div>
+            <div class="arb-val" id="valFlashTokens">0 <span style="font-size: 12px; color: var(--text-muted);">token</span></div>
           </div>
           <div class="arb-metric">
-            <div class="arb-label">Codex-ə Göndərilən (Distillə)</div>
-            <div class="arb-val" id="valCodexTokens">380 <span style="font-size: 12px; color: var(--text-muted);">token</span></div>
+            <div class="arb-label">Codex-ə Göndərilən (təxmini)</div>
+            <div class="arb-val" id="valCodexTokens">0 <span style="font-size: 12px; color: var(--text-muted);">token</span></div>
           </div>
           <div class="arb-metric">
             <div class="arb-label">Təxmini Dollar Qənaəti</div>
-            <div class="arb-val" style="color: var(--green);" id="valSavedDollars">$12.10</div>
+            <div class="arb-val" style="color: var(--green);" id="valSavedDollars">$0.00</div>
           </div>
           <div class="arb-metric">
-            <div class="arb-label">Ümumi Token Qənaəti</div>
-            <div class="arb-val" style="color: var(--accent);" id="valSavedPct">97.9%</div>
+            <div class="arb-label">Təxmini Token Qənaəti</div>
+            <div class="arb-val" style="color: var(--accent);" id="valSavedPct">0.0%</div>
           </div>
         </div>
       </section>
@@ -1010,7 +1046,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div id="viewTools" class="tools-view">
       <h2 style="font-size: 18px; margin-bottom: 6px;">Qeydiyyatdan Keçmiş 6 Native MCP Aləti</h2>
       <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 20px;">Codex və Antigravity-nin bir-birini çağırmaq üçün istifadə etdiyi maşın interfeysləri.</p>
-      
+
       <div class="tools-grid">
         <div class="tool-card">
           <div class="tool-name">call_antigravity_multimodal</div>
@@ -1054,7 +1090,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div id="viewConfig" class="config-view">
       <h2 style="font-size: 18px; margin-bottom: 6px;">Client Konfiqurasiyası (Codex & Claude)</h2>
       <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 20px;">Codex və ya Claude Desktop-u bu MCP serverinə qoşmaq üçün konfiqurasiya faylına bu bloku əlavə edin:</p>
-      
+
       <div style="background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 18px; position: relative;">
         <button style="position: absolute; top: 12px; right: 12px; background: rgba(255,255,255,0.06); border: 1px solid var(--border); color: #fff; padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 11px;" onclick="copyConfig(this)">Kopyala</button>
         <pre id="cfgText" style="font-family: ui-monospace, monospace; font-size: 13px; color: #d4d4d8;">{
@@ -1075,13 +1111,41 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
   <script>
     let currentMode = 'smart_adaptive';
+    // Inlined by the server for this same-origin document only.
+    const CG_TOKEN = __CG_TOKEN__;
+
+    function authHeaders(extra) {
+      return Object.assign({ 'X-Codex-Gravity-Token': CG_TOKEN || '' }, extra || {});
+    }
+
+    function chatMessage(sender, time, text) {
+      const div = document.createElement('div');
+      div.className = 'chat-msg';
+      const meta = document.createElement('div');
+      meta.className = 'chat-meta';
+      const who = document.createElement('span');
+      who.className = 'chat-sender';
+      who.textContent = sender;
+      const when = document.createElement('span');
+      when.className = 'chat-time';
+      when.textContent = time || '';
+      meta.appendChild(who);
+      meta.appendChild(when);
+      const body = document.createElement('div');
+      body.className = 'chat-text';
+      // textContent: agent and GUI text is untrusted data, never markup.
+      body.textContent = text;
+      div.appendChild(meta);
+      div.appendChild(body);
+      return div;
+    }
 
     function setMode(mode) {
       currentMode = mode;
       document.getElementById('btnModeAdaptive').className = mode === 'smart_adaptive' ? 'mode-pill active' : 'mode-pill';
       document.getElementById('btnModeEco').className = mode === 'eco' ? 'mode-pill active' : 'mode-pill';
       document.getElementById('btnModePower').className = mode === 'power' ? 'mode-pill active' : 'mode-pill';
-      
+
       const labels = {
         'smart_adaptive': 'Rejim: Smart Adaptive (Flash Skeleton + Codex Logic)',
         'eco': 'Rejim: Eco (Maksimum Flash, Minimum Token)',
@@ -1138,54 +1202,75 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       s3.className = 'step-node';
       s4.className = 'step-node';
 
-      setTimeout(() => { s1.className = 'step-node done'; s2.className = 'step-node active'; }, 400);
-      setTimeout(() => { s2.className = 'step-node done'; s3.className = 'step-node active'; }, 900);
-      setTimeout(() => { s3.className = 'step-node done'; s4.className = 'step-node active'; }, 1500);
-
       try {
         const res = await fetch('/api/studio/run', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: authHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify({ prompt, target_file: targetFile, mode: currentMode })
         });
         const data = await res.json();
+        if (!res.ok || data.status === 'error') {
+          throw new Error(data.error || ('HTTP ' + res.status));
+        }
 
-        s4.className = 'step-node done';
+        s2.className = 'step-node done';
+        s3.className = data.status === 'completed' ? 'step-node done' : 'step-node active';
+        s4.className = data.status === 'completed' ? 'step-node done' : 'step-node';
 
-        if (data.status === 'completed') {
-          // Render diff
-          document.getElementById('diffBox').innerText = data.code;
+        const stateLabel = document.getElementById('sandboxState');
+        stateLabel.textContent =
+          data.status === 'completed' ? 'VERIFIED PASS' :
+          data.status === 'unverified' ? 'YOXLANMADI' : 'FAILED';
+        stateLabel.style.color =
+          data.status === 'completed' ? 'var(--green)' :
+          data.status === 'unverified' ? 'var(--accent)' : 'var(--red)';
 
-          // Render Walkie Talkie chat
-          const chat = document.getElementById('chatStream');
-          chat.innerHTML = '';
-          (data.events || []).forEach(ev => {
-            const div = document.createElement('div');
-            div.className = 'chat-msg';
-            div.innerHTML = `
-              <div class="chat-meta">
-                <span class="chat-sender">[${(ev.sender || 'AGENT').toUpperCase()} ➜ ${(ev.recipient || 'ALL').toUpperCase()}]</span>
-                <span class="chat-time">${ev.timestamp || ''}</span>
-              </div>
-              <div class="chat-text">${ev.message || ''}</div>
-            `;
-            chat.appendChild(div);
-          });
-          chat.scrollTop = chat.scrollHeight;
+        let code = data.code || '(boş)';
+        if (data.is_mock) {
+          code += '\n\n[MOCK MODE: model açarı yoxdur, template nəticə göstərilir]';
+        }
+        document.getElementById('diffBox').textContent = code + '\n\n' + (data.verification_summary || '');
 
-          // Render Arbitrage
-          if (data.ledger) {
-            document.getElementById('valFlashTokens').innerText = (data.ledger.total_flash_tokens || 1240000).toLocaleString() + ' token';
-            document.getElementById('valCodexTokens').innerText = (data.ledger.total_codex_tokens || 380).toLocaleString() + ' token';
-            document.getElementById('valSavedDollars').innerText = '$' + (data.ledger.total_dollars_saved || 12.10).toFixed(2);
-            document.getElementById('valSavedPct').innerText = (data.ledger.total_baseline_cost > 0 ? ((data.ledger.total_dollars_saved / data.ledger.total_baseline_cost) * 100).toFixed(1) : 97.9) + '%';
-          }
+        const measured = !!(data.summary && data.summary.verification && data.summary.verification.viewports_measured);
+        document.getElementById('vpMobile').textContent = measured ? 'Ölçüldü' : 'Ölçülməyib';
+        document.getElementById('vpDesktop').textContent = measured ? 'Ölçüldü' : 'Ölçülməyib';
+
+        // Render Walkie Talkie chat (textContent only; event text is untrusted)
+        const chat = document.getElementById('chatStream');
+        chat.textContent = '';
+        const events = data.events || [];
+        events.forEach(ev => {
+          chat.appendChild(chatMessage(
+            '[' + (ev.sender || 'AGENT').toUpperCase() + ' ➜ ' + (ev.recipient || 'ALL').toUpperCase() + ']',
+            ev.timestamp,
+            ev.message || ''
+          ));
+        });
+        if (!events.length) {
+          chat.appendChild(chatMessage('[ROUTER ➜ ALL]', '—', 'Hadisə qeydə alınmadı.'));
+        }
+        chat.scrollTop = chat.scrollHeight;
+
+        // Estimated figures, not provider usage metadata
+        if (data.ledger) {
+          const flashTokens = data.ledger.total_flash_tokens ?? 0;
+          const codexTokens = data.ledger.total_codex_tokens ?? 0;
+          const dollarsSaved = Number(data.ledger.total_dollars_saved ?? 0);
+          const baselineCost = Number(data.ledger.total_baseline_cost ?? 0);
+          const savedPct = baselineCost > 0 ? ((dollarsSaved / baselineCost) * 100).toFixed(1) : '0.0';
+
+          document.getElementById('valFlashTokens').textContent = flashTokens.toLocaleString() + ' token';
+          document.getElementById('valCodexTokens').textContent = codexTokens.toLocaleString() + ' token';
+          document.getElementById('valSavedDollars').textContent = '$' + dollarsSaved.toFixed(2);
+          document.getElementById('valSavedPct').textContent = savedPct + '%';
         }
       } catch (err) {
+        document.getElementById('sandboxState').textContent = 'XƏTA';
+        document.getElementById('sandboxState').style.color = 'var(--red)';
         alert('İcra xətası: ' + err.message);
       } finally {
         btn.disabled = false;
-        btn.innerHTML = '<span>🚀 İcra Et</span>';
+        btn.textContent = '🚀 İcra Et';
       }
     }
 
@@ -1195,49 +1280,36 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       if (!msg) return;
 
       const chat = document.getElementById('chatStream');
-      const div = document.createElement('div');
-      div.className = 'chat-msg';
-      div.style.borderColor = 'rgba(249, 115, 22, 0.4)';
-      div.innerHTML = `
-        <div class="chat-meta">
-          <span class="chat-sender" style="color: #38bdf8;">[HUMAN ➜ AGENTS]</span>
-          <span class="chat-time">${new Date().toLocaleTimeString()}</span>
-        </div>
-        <div class="chat-text">${msg}</div>
-      `;
-      chat.appendChild(div);
+      chat.appendChild(chatMessage('[HUMAN ➜ AGENTS]', new Date().toLocaleTimeString(), msg));
       chat.scrollTop = chat.scrollHeight;
-
       inp.value = '';
 
-      await fetch('/api/studio/inject', {
+      const res = await fetch('/api/studio/inject', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ message: msg })
       });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        chat.appendChild(chatMessage('[SERVER ➜ HUMAN]', new Date().toLocaleTimeString(),
+          data.error || 'Müdaxilə qeydə alınmadı.'));
+      }
     }
 
     async function executeSingleTool(toolName, args) {
       switchTab('studio');
       const chat = document.getElementById('chatStream');
-      const div = document.createElement('div');
-      div.className = 'chat-msg';
-      div.innerHTML = `
-        <div class="chat-meta">
-          <span class="chat-sender">[STUDIO ➜ ${toolName.toUpperCase()}]</span>
-          <span class="chat-time">${new Date().toLocaleTimeString()}</span>
-        </div>
-        <div class="chat-text">Alət icra edilir...</div>
-      `;
-      chat.appendChild(div);
+      const holder = chatMessage('[STUDIO ➜ ' + toolName.toUpperCase() + ']',
+        new Date().toLocaleTimeString(), 'Alət icra edilir...');
+      chat.appendChild(holder);
 
       const res = await fetch('/api/execute-tool', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ tool_name: toolName, arguments: args })
       });
       const data = await res.json();
-      div.querySelector('.chat-text').innerText = JSON.stringify(data.result || data, null, 2);
+      holder.querySelector('.chat-text').textContent = JSON.stringify(data.result || data, null, 2);
       chat.scrollTop = chat.scrollHeight;
     }
 
@@ -1254,39 +1326,269 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 """
 
 
-def create_mcp_server(name: str = "codex-gravity-mcp", version: str = "0.1.0") -> MCPServer:
+def create_mcp_server(name: str = "codex-gravity-mcp", version: str | None = None) -> MCPServer:
     """
     Creates and configures the official Codex-Gravity MCP server with standard tools.
     """
+    if version is None:
+        try:
+            version = _package_version("codex-gravity")
+        except PackageNotFoundError:
+            version = "0.0.0+local"
     server = MCPServer(name, version=version)
+    from codex_gravity.gui import AntigravityGUI, GUIError
+    gui = AntigravityGUI()
+    completion = CompletionWatches(gui=gui)
+
+    async def gui_result(operation):
+        try:
+            return json.dumps(await operation, ensure_ascii=False)
+        except (GUIError, OSError, ValueError) as error:
+            return json.dumps({'status': 'error', 'error': str(error), 'task_id': getattr(error, 'task_id', None), 'transport': 'desktop-gui-cdp'}, ensure_ascii=False)
+
+    @server.tool(name="antigravity_gui_status", description="Inspect the real local Antigravity GUI: current model, busy state, and unsent draft. No CLI or API fallback.")
+    async def antigravity_gui_status(target_id: Optional[str] = None) -> str:
+        return await gui_result(gui.status(target_id))
+
+    def completion_for_request(ctx: Context):
+        caller = None
+        try:
+            meta = ctx.request_context.meta
+            data = meta.model_dump(by_alias=True) if meta is not None else {}
+            caller = data.get('openai/threadId') or data.get('openai/thread_id') or data.get('codex_thread_id')
+        except (AttributeError, ValueError):
+            pass
+        return CompletionWatches(gui=gui, desktop=DesktopCodex(caller_thread=caller))
+
+    async def attach_completion(record: dict, destination: Optional[str], ctx: Context):
+        if destination and record.get('task_id') and record.get('state') != 'unconfirmed':
+            try:
+                service = completion_for_request(ctx)
+                watch = await service.register(record['workspace'], record['task_id'], destination)
+                record['completion_watch'] = service.spawn(watch)
+            except (BridgeError, GUIError, OSError, ValueError) as error:
+                record['completion_watch_error'] = str(error)
+        return record
+
+    @server.tool(name="antigravity_gui_start_task", description="Send a scoped task to the real Antigravity GUI. Optionally watch completion and notify the exact existing Codex chat. No CLI/API fallback for Antigravity.")
+    async def antigravity_gui_start_task(prompt: str, workspace_path: str,
+                                        expected_model: str = "Gemini 3.8 Flash High",
+                                        target_id: Optional[str] = None,
+                                        new_conversation: bool = True,
+                                        gui_project: Optional[str] = None,
+                                        notify_codex_thread_id: Optional[str] = None, ctx: Context = None) -> str:
+        async def start():
+            record = await gui.start(prompt, workspace_path, expected_model, target_id, new_conversation, gui_project)
+            return await attach_completion(record, notify_codex_thread_id, ctx)
+        return await gui_result(start())
+
+    @server.tool(name="antigravity_gui_task_status", description="Read the owned GUI task. ready_for_review means its turn ended, not that code/tests passed.")
+    async def antigravity_gui_task_status(workspace_path: str, task_id: str) -> str:
+        return await gui_result(gui.poll(workspace_path, task_id))
+
+    @server.tool(name="antigravity_gui_followup", description="Send corrections to the same completed GUI task. Pass notify_codex_thread_id to watch the new round. Refuses busy chats, model changes and unsent drafts.")
+    async def antigravity_gui_followup(workspace_path: str, task_id: str, prompt: str,
+                                      notify_codex_thread_id: Optional[str] = None, ctx: Context = None) -> str:
+        async def followup():
+            record = await gui.followup(workspace_path, task_id, prompt)
+            return await attach_completion(record, notify_codex_thread_id, ctx)
+        return await gui_result(followup())
+
+    @server.tool(name="codex_gravity_watch_completion", description="Register/resume a detached completion watch for an owned Antigravity task and exact existing Codex thread UUID. Explicitly authorizes one completion follow-up for this round. Waits while Codex is busy; never silently retries uncertain delivery.")
+    async def codex_gravity_watch_completion(workspace_path: str, task_id: str,
+                                            codex_thread_id: str, poll_seconds: float = 5,
+                                            timeout_seconds: float = 3600, resume: bool = False, ctx: Context = None) -> str:
+        try:
+            service = completion_for_request(ctx)
+            record = await service.register(workspace_path, task_id, codex_thread_id,
+                                               poll_seconds, timeout_seconds, resume=resume)
+            return json.dumps(service.spawn(record), ensure_ascii=False)
+        except (BridgeError, GUIError, OSError, ValueError) as error:
+            return json.dumps({'status': 'error', 'error': str(error)}, ensure_ascii=False)
+
+    @server.tool(name="codex_gravity_completion_status", description="Read a persisted completion watch without sending a message. notified means desktop accepted a follow-up, not review success.")
+    async def codex_gravity_completion_status(workspace_path: str, watch_id: str) -> str:
+        try:
+            return json.dumps(completion.status(workspace_path, watch_id), ensure_ascii=False)
+        except (BridgeError, OSError, ValueError) as error:
+            return json.dumps({'status': 'error', 'error': str(error)}, ensure_ascii=False)
+
+    @server.tool(name="codex_gravity_cancel_completion", description="Cancel a completion watch. Does not cancel Antigravity or recall an already submitted Codex message.")
+    async def codex_gravity_cancel_completion(workspace_path: str, watch_id: str) -> str:
+        try:
+            return json.dumps(completion.cancel(workspace_path, watch_id), ensure_ascii=False)
+        except (BridgeError, OSError, ValueError) as error:
+            return json.dumps({'status': 'error', 'error': str(error)}, ensure_ascii=False)
+
+    # -- team layer --------------------------------------------------------
+    team = TeamOrchestrator(event_bus=_shared_event_bus)
+
+    @server.tool(name="team_agents", description="List team agent transports (codex CLI, codex-gui desktop app, antigravity, antigravity-gui) and whether each is reachable right now.")
+    async def team_agents(gui_agent: bool = False, codex_thread: Optional[str] = None) -> str:
+        pool = default_agents(gui_agent=gui_agent, codex_thread=codex_thread)
+        return json.dumps(
+            {name: agent.describe() for name, agent in sorted(pool.items())},
+            ensure_ascii=False,
+        )
+
+    @server.tool(name="team_run_task", description="Run a two-way Codex+Antigravity team: plan, adversarial review, cross-examination, revision, consensus and an optional real verification command. Pass codex_thread to use the ChatGPT/Codex desktop app instead of the CLI. Reports unavailable, deadlocked or failed honestly.")
+    async def team_run_task(prompt: str, workspace_path: str,
+                            plan_with: Optional[str] = None, implement_with: str = "antigravity",
+                            review_with: Optional[str] = None,
+                            judge_with: Optional[str] = None,
+                            codex_thread: Optional[str] = None,
+                            veto_agents: str = "", reviewer_weights: str = "",
+                            max_rounds: int = 3, require_unanimous: bool = True,
+                            test_command: Optional[str] = None,
+                            verification_retries: int = 1,
+                            human_notes: Optional[str] = None,
+                            gui_agent: bool = False,
+                            turn_timeout: float = 180) -> str:
+        # A desktop chat id means "use the app, not the CLI" unless stated otherwise.
+        codex_transport = "codex-gui" if codex_thread else "codex"
+        resolved_plan = (plan_with or codex_transport).strip()
+        resolved_reviewers = [
+            name.strip()
+            for name in (review_with or f"{codex_transport},antigravity").split(",")
+            if name.strip()
+        ]
+        try:
+            config = TeamConfig(
+                task=prompt,
+                workspace=str(Path(workspace_path).expanduser()),
+                plan_with=resolved_plan,
+                implement_with=implement_with,
+                review_with=resolved_reviewers,
+                judge_with=judge_with,
+                codex_thread=codex_thread,
+                veto_agents=[name.strip() for name in veto_agents.split(",") if name.strip()],
+                reviewer_weights={
+                    key.strip(): float(value)
+                    for key, _, value in (item.partition("=") for item in reviewer_weights.split(","))
+                    if key.strip() and value.strip().replace(".", "", 1).isdigit()
+                },
+                max_rounds=max_rounds,
+                require_unanimous=require_unanimous,
+                test_command=test_command,
+                verification_retries=verification_retries,
+                human_notes=[line.strip() for line in (human_notes or "").splitlines() if line.strip()],
+                turn_timeout=turn_timeout,
+            )
+        except ValueError as error:
+            return json.dumps({'status': 'error', 'error': f'Invalid team request: {error}'}, ensure_ascii=False)
+        try:
+            result = await team.run(
+                config,
+                agents=default_agents(turn_timeout=turn_timeout, gui_agent=gui_agent, codex_thread=codex_thread),
+            )
+        except TeamError as error:
+            return json.dumps({'status': 'error', 'error': str(error)}, ensure_ascii=False)
+        return json.dumps(result.model_dump(mode="json"), ensure_ascii=False)
+
+    @server.tool(name="team_status", description="Read a team session: running/finished, last message, decision and transcript path. Never reconstructs a missing session.")
+    async def team_status(workspace_path: str, session_id: str) -> str:
+        try:
+            return json.dumps(team.status(workspace_path, session_id), ensure_ascii=False)
+        except (TeamError, OSError, ValueError) as error:
+            return json.dumps({'status': 'error', 'error': str(error)}, ensure_ascii=False)
+
+    @server.tool(name="team_transcript", description="Read a team session transcript as JSON messages or rendered Markdown.")
+    async def team_transcript(workspace_path: str, session_id: str, fmt: str = "json", limit: int = 200) -> str:
+        from codex_gravity.team.protocol import TeamTranscript
+        try:
+            transcript = TeamTranscript(workspace_path, session_id)
+        except TeamError as error:
+            return json.dumps({'status': 'error', 'error': str(error)}, ensure_ascii=False)
+        if fmt == "markdown":
+            return transcript.to_markdown()
+        return json.dumps(
+            [message.model_dump(mode="json") for message in transcript.messages()[-max(1, limit):]],
+            ensure_ascii=False,
+        )
+
+    @server.tool(name="team_send_message", description="Send a message into a team session as 'human' or another agent (kinds: note, question, answer, critique, approval, rejection). Delivered live when the session runs in this process, otherwise stored for audit.")
+    async def team_send_message(workspace_path: str, session_id: str, body: str,
+                                sender: str = "human", recipient: str = "all",
+                                kind: str = "note") -> str:
+        try:
+            return json.dumps(
+                await team.send_message(workspace_path, session_id, sender, recipient, kind, body),
+                ensure_ascii=False,
+            )
+        except (TeamError, OSError, ValueError) as error:
+            return json.dumps({'status': 'error', 'error': str(error)}, ensure_ascii=False)
+
+    @server.tool(name="team_cancel", description="Request cancellation of a team session running in this MCP process. In-flight agent turns finish; no new round starts.")
+    async def team_cancel(workspace_path: str, session_id: str) -> str:
+        cancelled = team.cancel(workspace_path, session_id)
+        return json.dumps({
+            'status': 'cancelling' if cancelled else 'not_running',
+            'note': None if cancelled else 'The session is not running in this process; nothing to cancel.',
+        }, ensure_ascii=False)
+
+    @server.tool(name="codex_gui_status", description="Inspect the ChatGPT/Codex desktop app: its live app-tools catalogue, the chat's busy state, turn count and last message. Read-only; requires running inside the Codex desktop app.")
+    async def codex_gui_status(thread_id: str) -> str:
+        try:
+            chat = CodexDesktopChat(thread_id)
+            tools = await chat.catalogue()
+            snapshot = await chat.snapshot()
+            return json.dumps({
+                'status': 'connected',
+                'engine': 'codex-desktop-gui',
+                'thread': snapshot_to_dict(snapshot),
+                'tools': tools,
+            }, ensure_ascii=False)
+        except (BridgeError, CodexDesktopUnavailable, OSError, ValueError) as error:
+            available, reason = desktop_availability(thread_id)
+            return json.dumps({
+                'status': 'error',
+                'error': str(error),
+                'transport_available': available,
+                'reason': reason,
+            }, ensure_ascii=False)
+
+    @server.tool(name="codex_gui_ask", description="Send one message to an exact existing ChatGPT/Codex desktop chat and wait for the new completed reply. Returns status=unconfirmed when no reply can be observed; it never guesses and never resends.")
+    async def codex_gui_ask(thread_id: str, message: str,
+                            timeout_seconds: float = 300, poll_seconds: float = 2) -> str:
+        try:
+            chat = CodexDesktopChat(thread_id, poll_interval=poll_seconds)
+            reply = await chat.ask(message, timeout=timeout_seconds)
+            return json.dumps(reply_to_dict(reply), ensure_ascii=False)
+        except (BridgeError, CodexDesktopUnavailable, OSError, ValueError) as error:
+            return json.dumps({'status': 'error', 'ok': False, 'error': str(error)}, ensure_ascii=False)
 
     @server.custom_route("/", methods=["GET"])
     async def index(request: Any) -> Any:
-        return HTMLResponse(DASHBOARD_HTML)
+        # The token is inlined for this same-origin document only. A cross-origin
+        # page cannot read the body, so it cannot replay the token.
+        token = json.dumps(studio_token()).replace("</", "<\\/")
+        return HTMLResponse(DASHBOARD_HTML.replace("__CG_TOKEN__", token))
 
     @server.custom_route("/health", methods=["GET"])
     async def health(request: Any) -> Any:
+        # Derived from the live registry so the list cannot drift from reality.
+        tools = sorted(tool.name for tool in await server.list_tools())
         return JSONResponse({
             "status": "healthy",
             "server": "codex-gravity-mcp",
             "version": version,
             "mcp_endpoint": "/mcp",
-            "active_tools": [
-                "antigravity_inspect_media",
-                "antigravity_distill_context",
-                "antigravity_verify_and_screenshot",
-                "call_antigravity_verifier",
-                "call_codex_architect",
-                "call_antigravity_multimodal",
-            ],
+            "tool_count": len(tools),
+            "active_tools": tools,
         })
 
     @server.custom_route("/api/execute-tool", methods=["POST"])
     async def execute_tool(request: Any) -> Any:
         try:
             body = await request.json()
-            tool_name = body.get("tool_name")
-            arguments = body.get("arguments", {})
+        except Exception:
+            return JSONResponse({"status": "error", "error": "Expected a JSON body."}, status_code=400)
+        tool_name = body.get("tool_name")
+        arguments = body.get("arguments", {})
+        denied = _studio_denied(request, tool_name if isinstance(tool_name, str) else None)
+        if denied:
+            return denied
+        try:
             start_t = asyncio.get_event_loop().time()
             res = await server.call_tool(tool_name, arguments)
             latency_ms = round((asyncio.get_event_loop().time() - start_t) * 1000, 1)
@@ -1333,11 +1635,22 @@ def create_mcp_server(name: str = "codex-gravity-mcp", version: str = "0.1.0") -
 
     @server.custom_route("/api/studio/run", methods=["POST"])
     async def studio_run(request: Any) -> Any:
+        denied = _studio_denied(request)
+        if denied:
+            return denied
         try:
             body = await request.json()
             prompt = body.get("prompt", "Create component")
             target_file = body.get("target_file", "auth_service.py")
             mode_str = body.get("mode", "smart_adaptive")
+            # Only real checks count. By default the generated Python file is
+            # compiled inside the sandbox; callers may supply a stronger command.
+            test_command = body.get("test_command")
+            if not test_command and str(target_file).endswith(".py"):
+                test_command = (
+                    f"{shlex.quote(sys.executable)} -m py_compile {shlex.quote(str(target_file))}"
+                )
+            ui_url = body.get("ui_url")
 
             mode = RoutingMode.SMART_ADAPTIVE
             if mode_str == "eco":
@@ -1349,8 +1662,8 @@ def create_mcp_server(name: str = "codex-gravity-mcp", version: str = "0.1.0") -
                 prompt=prompt,
                 target_file=target_file,
                 mode=mode,
-                test_command="python3 -c 'print(\"Terminal verification & AST integrity pass\")'",
-                ui_url="http://127.0.0.1:8000",
+                test_command=test_command,
+                ui_url=ui_url,
                 auto_merge=False,
             )
 
@@ -1370,30 +1683,33 @@ def create_mcp_server(name: str = "codex-gravity-mcp", version: str = "0.1.0") -
                 for e in history
             ]
 
-            written_code = ""
-            target_path = repo_root / target_file
-            if target_path.exists():
-                try:
-                    written_code = target_path.read_text(encoding="utf-8", errors="replace")
-                except Exception:
-                    pass
+            written_code = res.generated_code or ""
+            if not written_code:
+                target_path = repo_root / target_file
+                if target_path.exists():
+                    try:
+                        written_code = target_path.read_text(encoding="utf-8", errors="replace")
+                    except Exception:
+                        pass
+
+            if not res.verified:
+                status = "unverified"
+            elif res.success:
+                status = "completed"
+            else:
+                status = "failed"
 
             return JSONResponse({
-                "status": "completed",
+                "status": status,
+                "verified": res.verified,
+                "is_mock": res.is_mock,
+                "heuristic_repair_used": res.heuristic_repair_used,
+                "verification_summary": (
+                    res.verification.summary_text if res.verification else "no verification requested"
+                ),
                 "summary": res.model_dump(),
                 "events": events,
-                "code": written_code or (
-                    "# Speculative Drafting Pipeline (Gemini Flash AST + Codex Logic)\n"
-                    "import asyncio\n"
-                    "from typing import Optional, Dict, Any\n\n"
-                    "class AuthService:\n"
-                    "    def __init__(self, jwt_secret: str = 'env-secret'):\n"
-                    "        self.jwt_secret = jwt_secret\n"
-                    "        self.cache: Dict[str, Any] = {}\n\n"
-                    "    async def login(self, username: str, token_hash: str) -> Dict[str, Any]:\n"
-                    "        # Codex Core algorithmic JWT logic\n"
-                    "        return {'status': 'authorized', 'user': username, 'expires_in': 3600}\n"
-                ),
+                "code": written_code,
                 "ledger": _shared_router.ledger.model_dump(),
             })
         except Exception as e:
@@ -1401,6 +1717,9 @@ def create_mcp_server(name: str = "codex-gravity-mcp", version: str = "0.1.0") -
 
     @server.custom_route("/api/studio/inject", methods=["POST"])
     async def studio_inject(request: Any) -> Any:
+        denied = _studio_denied(request)
+        if denied:
+            return denied
         try:
             body = await request.json()
             msg = body.get("message", "")
@@ -1412,7 +1731,7 @@ def create_mcp_server(name: str = "codex-gravity-mcp", version: str = "0.1.0") -
 
     @server.tool(
         name="antigravity_inspect_media",
-        description="Analyzes video or audio files using Gemini multimodal zero-copy transport and returns timestamped technical summary.",
+        description="Reads local video/audio/image metadata via ffprobe and, when a model is configured, asks it for an analysis. Returns status=partial when only metadata was read.",
     )
     async def antigravity_inspect_media(file_path: str, focus_query: str) -> str:
         """
@@ -1539,9 +1858,9 @@ def create_mcp_server(name: str = "codex-gravity-mcp", version: str = "0.1.0") -
 
         result = {
             "issue_description": issue_description,
-            "raw_lines_analyzed": max(raw_lines, 100),
+            "raw_lines_analyzed": raw_lines,
             "distilled_lines": distilled_lines,
-            "token_reduction_pct": max(70.0, token_reduction_pct),
+            "token_reduction_pct": max(0.0, token_reduction_pct),
             "ast_anchor": ast_anchor or "Root context anchor",
             "distilled_context": distilled_content,
         }
@@ -1621,21 +1940,13 @@ def create_mcp_server(name: str = "codex-gravity-mcp", version: str = "0.1.0") -
     async def call_antigravity_verifier(test_command: str, ui_url: Optional[str] = None) -> str:
         return await antigravity_verify_and_screenshot(test_command=test_command, ui_url=ui_url)
 
-    @server.tool(
-        name="call_codex_architect",
-        description="Symmetrical tool: Antigravity requests OpenAI Codex for deep algorithmic implementation or refactoring.",
-    )
-    async def call_codex_architect(prompt: str, code_context: str) -> str:
-        """
-        Symmetrical MCP Gateway: Enables Antigravity to request Codex logic generation.
-        """
-        response = {
-            "status": "completed",
-            "provider": "codex-o3-mini",
-            "algorithmic_summary": f"Refactored logic addressing '{prompt}'.",
-            "generated_code": f"# Refactored implementation\n# Context length: {len(code_context)} chars\ndef optimized_handler():\n    return True\n",
-        }
-        return json.dumps(response, indent=2)
+    @server.tool(name="call_codex_architect", description="Ask the real signed-in Codex CLI for a bounded read-only code/architecture answer. Uses the configured model; no synthetic fallback or provider API. Does not create a persistent chat or edit files.")
+    async def call_codex_architect(prompt: str, code_context: str = "",
+                                  workspace_path: Optional[str] = None, timeout: float = 300) -> str:
+        try:
+            return json.dumps(await run_codex_architect(prompt, code_context, workspace_path, timeout), ensure_ascii=False)
+        except (BridgeError, OSError, ValueError, TimeoutError) as error:
+            return json.dumps({'status': 'error', 'provider': 'codex', 'error': str(error) or 'Codex timed out; no completed answer.'}, ensure_ascii=False)
 
     @server.tool(
         name="call_antigravity_multimodal",
@@ -1646,25 +1957,16 @@ def create_mcp_server(name: str = "codex-gravity-mcp", version: str = "0.1.0") -
         Symmetrical MCP Gateway: Enables Codex to request real Google Antigravity (Gemini 3.8 Flash)
         using the user's active local Antigravity subscription (no external API keys needed).
         """
-        # If running within unit test runner, return test fixture immediately
-        if os.environ.get("PYTEST_CURRENT_TEST"):
-            return json.dumps({
-                "status": "completed",
-                "provider": "gemini-3.8-flash",
-                "engine": "google-antigravity-subscription (test-mode)",
-                "instruction": instruction,
-                "target": media_path,
-                "distillation": f"Extracted visual/audio insights from '{media_path}'. Layout and audio cues verified.",
-            }, indent=2)
-
         p = _resolve_local_path(media_path)
         media_probe_info = None
         if p and p.exists():
             media_probe_info = await _inspect_media_with_gemini_or_probe(p, focus_query=instruction, instruction=instruction)
-            if media_probe_info and media_probe_info.get("analysis"):
+            # Only a real model answer may be presented as an analysis. ffprobe
+            # metadata alone is not an answer to the instruction.
+            if media_probe_info and media_probe_info.get("analysis_available"):
                 return json.dumps({
                     "status": "completed",
-                    "provider": "gemini-3.8-flash",
+                    "provider": media_probe_info.get("provider", "gemini-3.8-flash"),
                     "engine": media_probe_info.get("engine", "google-antigravity-subscription (native agentapi)"),
                     "instruction": instruction,
                     "target": str(p),
@@ -1717,12 +2019,17 @@ def create_mcp_server(name: str = "codex-gravity-mcp", version: str = "0.1.0") -
 
         # 3. Graceful completion with media probe
         return json.dumps({
-            "status": "completed",
-            "provider": "gemini-3.8-flash",
-            "engine": "google-antigravity-subscription",
+            "status": "unavailable",
+            "provider": "none",
+            "engine": "no-model-available",
             "instruction": instruction,
             "target": media_path,
-            "distillation": f"Media target '{media_path}' processed. Audio/visual cues extracted.",
+            "analysis_available": False,
+            "error": (
+                "No Antigravity agentapi binary and no GEMINI_API_KEY / GOOGLE_API_KEY were available, "
+                "so nothing analysed this request. Configure one of them and retry."
+            ),
+            "distillation": None,
             "media_analysis": media_probe_info,
         }, indent=2)
 

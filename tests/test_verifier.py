@@ -57,7 +57,9 @@ async def test_visual_multi_viewport_inspector():
     mobile_res = next(r for r in results if r.viewport_name == "mobile")
     assert mobile_res.width == 375
     assert mobile_res.height == 667
-    assert mobile_res.passed is True
+    # No backend is bundled, so the mobile layout is not claimed as verified.
+    assert mobile_res.measured is False
+    assert mobile_res.screenshot_path is None
 
 
 @pytest.mark.asyncio
@@ -155,14 +157,75 @@ def test_root_cause_analyzer_jest_and_ts():
 
 
 @pytest.mark.asyncio
-async def test_visual_viewport_overflow_detection():
+async def test_visual_viewport_is_reported_as_unmeasured_without_backend():
+    """
+    Without a real renderer the inspector must not pretend the layout was
+    verified: no screenshot path, measured=False, and no invented regression.
+    """
     inspector = VisualRegressionInspector()
     results = await inspector.check_viewports("http://localhost:3000/overflow")
 
-    mobile_res = next(r for r in results if r.viewport_name == "mobile")
-    assert mobile_res.passed is False
-    assert mobile_res.regression_type == "HorizontalOverflow"
-    assert "flex-direction: column" in (mobile_res.suggested_css_fix or "")
+    assert len(results) == 3
+    for res in results:
+        assert res.measured is False
+        assert res.backend == "none"
+        assert res.screenshot_path is None
+        assert res.regression_type is None
+        assert res.suggested_css_fix is None
+        assert "not measured" in res.analysis
 
-    desktop_res = next(r for r in results if r.viewport_name == "desktop")
-    assert desktop_res.passed is True
+
+@pytest.mark.asyncio
+async def test_visual_viewport_custom_checker_path():
+    """
+    Regression test: the custom-checker branch referenced ``asyncio`` without
+    importing it and raised NameError on every call.
+    """
+    from codex_gravity.verifier import ViewportCheckResult
+
+    def checker(url: str, width: int, height: int) -> ViewportCheckResult:
+        return ViewportCheckResult(
+            viewport_name=f"{width}x{height}",
+            width=width,
+            height=height,
+            passed=width >= 400,
+            measured=True,
+            backend="test-renderer",
+            analysis=f"measured {url}",
+        )
+
+    inspector = VisualRegressionInspector(custom_checker=checker)
+    results = await inspector.check_viewports("http://localhost:3000")
+
+    assert [r.passed for r in results] == [False, True, True]
+    assert all(r.measured for r in results)
+    assert all(r.backend == "test-renderer" for r in results)
+
+
+@pytest.mark.asyncio
+async def test_verify_marks_viewports_unmeasured():
+    """VerificationResult must expose that no visual measurement happened."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        repo_dir = Path(tmpdir).resolve()
+        subprocess.run(["git", "init", "-b", "main"], cwd=repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True, capture_output=True)
+        (repo_dir / "README.md").write_text("# Test\n", encoding="utf-8")
+        subprocess.run(["git", "add", "README.md"], cwd=repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=repo_dir, check=True, capture_output=True)
+
+        engine = VerificationEngine()
+        sandbox = SandboxManager(repo_root=repo_dir, task_id="unmeasured-vp")
+        await sandbox.initialize()
+        try:
+            result = await engine.verify(
+                sandbox=sandbox,
+                test_command=f"{sys.executable} -c 'print(1)'",
+                ui_url="http://localhost:3000",
+            )
+            assert result.test_result.passed is True
+            assert result.viewports_measured is False
+            assert "NOT MEASURED" in result.summary_text
+            assert len(result.viewport_results) == 3
+        finally:
+            await sandbox.cleanup()

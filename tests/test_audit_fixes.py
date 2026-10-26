@@ -1,9 +1,6 @@
-import asyncio
-import os
 import pytest
 from pathlib import Path
 
-from codex_gravity.event_bus import EventBus, Event, EventType
 from codex_gravity.sandbox import LockState, SandboxManager, StateLock
 from codex_gravity.speculative import (
     AnchorTarget,
@@ -12,7 +9,7 @@ from codex_gravity.speculative import (
     SpeculativeDraftingPipeline,
 )
 from codex_gravity.verifier import DiagnosticReport, RootCauseAnalyzer
-from codex_gravity.router import RoutingMode, SmartRouter, TaskRequest
+from codex_gravity.router import SmartRouter
 from codex_gravity.mcp_server import create_mcp_server
 
 

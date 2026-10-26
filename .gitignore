@@ -9,3 +9,10 @@ dist/
 build/
 .coverage
 htmlcov/
+.codex-gravity/
+# Local secrets: .env holds provider keys and must never be committed.
+.env
+.env.local
+logs/
+.ruff_cache/
+.mypy_cache/

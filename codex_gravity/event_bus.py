@@ -9,9 +9,12 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from enum import Enum
+import logging
 from typing import Any, Callable, Coroutine, Optional, Union
 import uuid
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 
 class EventType(str, Enum):
@@ -128,10 +131,15 @@ class EventBus:
                 if asyncio.iscoroutine(res):
                     async_coros.append(res)
             except Exception:
-                pass
+                # One failing subscriber must not break delivery, but a silent
+                # swallow hides real defects: log it and continue.
+                logger.exception("Event handler %r failed for %s", handler, type_key)
 
         if async_coros:
-            await asyncio.gather(*async_coros, return_exceptions=True)
+            results = await asyncio.gather(*async_coros, return_exceptions=True)
+            for handler, outcome in zip(async_coros, results):
+                if isinstance(outcome, BaseException):
+                    logger.error("Async event handler %r failed: %r", handler, outcome)
 
     async def send_dialogue(
         self,

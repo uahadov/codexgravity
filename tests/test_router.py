@@ -49,16 +49,20 @@ async def test_router_eco_mode(temp_git_repo):
         prompt="Generate minimal healthcheck endpoint",
         target_file="src/health.py",
         mode=RoutingMode.ECO,
+        test_command="python3 -c 'import ast; ast.parse(open(\"src/health.py\").read())'",
         auto_merge=True,
     )
 
     summary = await router.execute_task(req, repo_root=temp_git_repo)
 
+    assert summary.verified is True
     assert summary.success is True
     assert summary.mode == RoutingMode.ECO
     assert summary.merged is True
     assert (temp_git_repo / "src" / "health.py").exists()
-    assert summary.arbitrage.codex_tokens_used <= 50  # Eco mode enforces minimal Codex usage
+    # Eco mode never calls Codex, so it must not be billed for Codex tokens.
+    assert summary.arbitrage.codex_tokens_used == 0
+    assert summary.arbitrage.estimated is True
 
 
 @pytest.mark.asyncio
@@ -68,11 +72,13 @@ async def test_router_power_mode(temp_git_repo):
         prompt="Implement secure cryptographic hashing utility",
         target_file="src/crypto_util.py",
         mode=RoutingMode.POWER,
+        test_command="python3 -c 'import ast; ast.parse(open(\"src/crypto_util.py\").read())'",
         auto_merge=True,
     )
 
     summary = await router.execute_task(req, repo_root=temp_git_repo)
 
+    assert summary.verified is True
     assert summary.success is True
     assert summary.mode == RoutingMode.POWER
     assert "Adversarial Red-Team Audit" in summary.walkie_talkie_transcript
@@ -89,6 +95,7 @@ async def test_router_circuit_breaker_failover(temp_git_repo):
         prompt="Generate payment webhook listener",
         target_file="src/webhook.py",
         mode=RoutingMode.SMART_ADAPTIVE,
+        test_command="python3 -c 'import ast; ast.parse(open(\"src/webhook.py\").read())'",
         auto_merge=True,
     )
 

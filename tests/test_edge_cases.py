@@ -1,26 +1,18 @@
-import asyncio
-import sys
 import tempfile
 import subprocess
 from pathlib import Path
 import pytest
 
-from codex_gravity.event_bus import EventBus, Event, EventType
+from codex_gravity.event_bus import EventBus, EventType
 from codex_gravity.sandbox import SandboxManager
 from codex_gravity.speculative import (
-    AnchorTarget,
-    CodexPatch,
-    DraftSkeleton,
     SpeculativeDraftingPipeline,
 )
 from codex_gravity.verifier import (
-    DiagnosticReport,
     RootCauseAnalyzer,
     VerificationEngine,
-    VisualRegressionInspector,
-    ViewportCheckResult,
 )
-from codex_gravity.router import SmartRouter, TaskRequest, RoutingMode
+from codex_gravity.router import SmartRouter, TaskRequest
 from codex_gravity.mcp_server import create_mcp_server
 
 
@@ -84,7 +76,7 @@ async def test_event_bus_fault_tolerant_handlers():
     bus.subscribe(EventType.AGENT_DIALOGUE, ok_handler)
 
     # Crashing handler must not crash publish or prevent ok_handler
-    event = await bus.send_dialogue("codex", "antigravity", "Test resilient event")
+    await bus.send_dialogue("codex", "antigravity", "Test resilient event")
     assert len(received) == 1
     assert received[0].message == "Test resilient event"
 
@@ -163,15 +155,21 @@ async def test_mcp_media_inspect_nonexistent():
 
 
 @pytest.mark.asyncio
-async def test_router_no_auto_merge(temp_git_repo):
+async def test_router_without_verification_is_unverified_and_never_merges(temp_git_repo):
+    """
+    Fail-closed contract: without a test_command/ui_url nothing was checked, so
+    the run is reported as unverified (not success) and cannot merge.
+    """
     router = SmartRouter()
     req = TaskRequest(
         prompt="Write helper function",
         target_file="src/helper.py",
-        auto_merge=False,
+        auto_merge=True,
     )
     summary = await router.execute_task(req, repo_root=temp_git_repo)
-    assert summary.success is True
+    assert summary.verified is False
+    assert summary.verification is None
+    assert summary.success is False
     assert summary.merged is False
-    # Main repo should NOT have the file when auto_merge is False
+    # Main repo should NOT have the file when nothing was verified
     assert not (temp_git_repo / "src" / "helper.py").exists()

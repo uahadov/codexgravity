@@ -1,10 +1,9 @@
-import asyncio
 import pytest
 from pathlib import Path
 import tempfile
 import subprocess
 
-from codex_gravity.sandbox import SandboxManager, StateLock, LockState, CommandResult
+from codex_gravity.sandbox import SandboxManager, StateLock, LockState
 
 
 @pytest.fixture

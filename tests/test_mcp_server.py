@@ -38,10 +38,15 @@ async def test_mcp_inspect_media_zero_copy():
             {"file_path": media_path, "focus_query": "Look for login modal"},
         )
         data = json.loads(res.content[0].text)
-        assert data["status"] == "success"
+        # No model answered, so this is metadata-only and must say so.
+        assert data["status"] == "partial"
+        assert data["analysis_available"] is False
+        assert data["provider"] == "ffprobe"
+        assert "gemini_connection_status" not in data
+        assert "No model analysed this file" in data["notice"]
+        assert data["timestamps"] == []
         assert data["file_path"] == str(Path(media_path).resolve())
         assert data["size_bytes"] == 1024
-        assert len(data["timestamps"]) > 0
     finally:
         Path(media_path).unlink(missing_ok=True)
 
@@ -87,7 +92,10 @@ async def test_mcp_verify_and_screenshot():
 
 
 @pytest.mark.asyncio
-async def test_mcp_symmetrical_gateway():
+async def test_mcp_symmetrical_gateway(monkeypatch):
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr("codex_gravity.mcp_server.run_codex_architect",
+                        AsyncMock(return_value={"status": "completed", "provider": "codex", "answer": "Use an LRU cache."}))
     server = create_mcp_server()
 
     res_codex = await server.call_tool(
@@ -96,15 +104,19 @@ async def test_mcp_symmetrical_gateway():
     )
     codex_data = json.loads(res_codex.content[0].text)
     assert codex_data["status"] == "completed"
-    assert codex_data["provider"] == "codex-o3-mini"
+    assert codex_data["provider"] == "codex"
+    assert codex_data["answer"] == "Use an LRU cache."
 
     res_agy = await server.call_tool(
         "call_antigravity_multimodal",
         {"media_path": "/tmp/test.png", "instruction": "Check visual layout"},
     )
     agy_data = json.loads(res_agy.content[0].text)
-    assert agy_data["status"] == "completed"
-    assert agy_data["provider"] == "gemini-3.8-flash"
+    # With no agentapi binary and no API key, nothing analysed the request.
+    assert agy_data["status"] == "unavailable"
+    assert agy_data["analysis_available"] is False
+    assert agy_data["distillation"] is None
+    assert "nothing analysed this request" in agy_data["error"]
 
 
 def test_mcp_streamable_http_app():
@@ -140,7 +152,7 @@ async def test_mcp_file_uri_support():
             {"file_path": file_uri, "focus_query": "check zero copy uri"},
         )
         data = json.loads(res.content[0].text)
-        assert data["status"] == "success"
+        assert data["status"] == "partial"
         assert data["size_bytes"] == 512
     finally:
         Path(media_path).unlink(missing_ok=True)
@@ -176,5 +188,9 @@ def test_mcp_dashboard_and_health_routes():
     data = res_health.json()
     assert data["status"] == "healthy"
     assert data["server"] == "codex-gravity-mcp"
-    assert len(data["active_tools"]) == 6
+    assert data["tool_count"] == len(data["active_tools"])
+    assert data["tool_count"] >= 15
+    assert "antigravity_gui_start_task" in data["active_tools"]
+    for team_tool in ("team_run_task", "team_status", "team_send_message", "team_transcript", "team_cancel", "team_agents"):
+        assert team_tool in data["active_tools"]
 

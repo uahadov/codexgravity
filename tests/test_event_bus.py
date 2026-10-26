@@ -1,6 +1,5 @@
 import asyncio
 import pytest
-from datetime import datetime
 
 from codex_gravity.event_bus import EventBus, Event, EventType
 
@@ -18,10 +17,10 @@ async def test_event_bus_pub_sub_and_wildcard():
         received_all.append(event)
 
     sub_d = bus.subscribe(EventType.AGENT_DIALOGUE, on_dialogue)
-    sub_all = bus.subscribe("*", on_all)
+    bus.subscribe("*", on_all)
 
     # Publish dialogue event
-    e1 = await bus.send_dialogue(
+    await bus.send_dialogue(
         sender="codex",
         recipient="antigravity",
         message="Created draft patch.",

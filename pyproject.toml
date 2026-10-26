@@ -4,12 +4,26 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codex-gravity"
-version = "0.1.0"
-description = "Hybrid OpenAI Codex and Google Antigravity (Gemini 3.8 Flash) Autonomous Coding Engine"
+version = "0.3.0"
+description = "Two-way Codex + Antigravity team harness: plan, adversarial review, cross-examination, consensus and real verification over MCP"
 readme = "README.md"
 requires-python = ">=3.10"
+license = { text = "MIT" }
 authors = [
     { name = "Codex Gravity Team" }
+]
+keywords = ["mcp", "multi-agent", "codex", "antigravity", "gemini", "consensus", "code-review", "ai-agents"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Code Generators",
+    "Topic :: Software Development :: Quality Assurance",
+    "Typing :: Typed",
 ]
 dependencies = [
     "mcp>=2.0.0",
@@ -17,22 +31,54 @@ dependencies = [
     "uvicorn>=0.30.0",
     "pydantic>=2.0.0",
     "httpx>=0.27.0",
+    "websockets>=15.0",
+    # Imported at module scope by codex_gravity.mcp_server.
+    "python-dotenv>=1.0.0",
+    "starlette>=0.37.0",
 ]
 
 [project.optional-dependencies]
+# Live Gemini client used by the media/distillation paths when a key is set.
+media = [
+    "google-genai>=1.0.0",
+]
 test = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.6.0",
 ]
 
 [project.scripts]
 codex-gravity = "codex_gravity.cli:main"
 codex-gravity-mcp = "codex_gravity.mcp_server:main"
+codex-gravity-team = "codex_gravity.team.cli:main"
+codex-gravity-tui = "codex_gravity.tui:main"
+
+[project.urls]
+Homepage = "https://github.com/codex-gravity/codex-gravity"
+Documentation = "https://github.com/codex-gravity/codex-gravity/blob/main/docs/TEAMWORK.md"
+Issues = "https://github.com/codex-gravity/codex-gravity/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["codex_gravity*"]
+include = ["codex_gravity", "codex_gravity.*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Compact fixture setup in tests uses one-liners deliberately.
+"tests/*" = ["E701", "E702"]

@@ -7,6 +7,7 @@ and coordinates autonomous self-healing loops between Antigravity and Codex.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from pathlib import Path
 from typing import Any, Callable, Coroutine, Optional, Union
@@ -25,6 +26,14 @@ class TestExecutionResult(BaseModel):
     duration_seconds: float
 
 
+class StackFrame(BaseModel):
+    file_path: str
+    line_number: int
+    function_name: str = ""
+    code_snippet: str = ""
+    is_test: bool = False
+
+
 class DiagnosticReport(BaseModel):
     has_error: bool
     error_type: str = "NoError"
@@ -35,12 +44,27 @@ class DiagnosticReport(BaseModel):
     recommended_fix: str = ""
     raw_log_snippet: str = ""
 
+    # Source code localization fields for targeted self-healing
+    source_file: Optional[str] = None
+    source_line: Optional[int] = None
+    source_code_snippet: Optional[str] = None
+    failing_function: Optional[str] = None
+    test_file: Optional[str] = None
+    test_line: Optional[int] = None
+    test_assert_snippet: Optional[str] = None
+    stack_frames: list[StackFrame] = Field(default_factory=list)
+
 
 class ViewportCheckResult(BaseModel):
     viewport_name: str
     width: int
     height: int
     passed: bool
+    # ``measured`` separates "a real renderer inspected this viewport" from
+    # "no visual backend is configured". An unmeasured viewport is never
+    # reported as a verified pass.
+    measured: bool = False
+    backend: str = "none"
     screenshot_path: Optional[str] = None
     regression_type: Optional[str] = None
     css_selector: Optional[str] = None
@@ -53,12 +77,20 @@ class VerificationResult(BaseModel):
     test_result: TestExecutionResult
     diagnostics: Optional[DiagnosticReport] = None
     viewport_results: list[ViewportCheckResult] = Field(default_factory=list)
+    viewports_measured: bool = False
     requires_healing: bool = False
 
     @property
     def summary_text(self) -> str:
         status = "PASSED" if self.all_passed else "FAILED"
-        vp_status = "All viewports OK" if all(v.passed for v in self.viewport_results) else "Viewport issues detected"
+        if not self.viewport_results:
+            vp_status = "not requested"
+        elif not self.viewports_measured:
+            vp_status = "NOT MEASURED (no visual backend configured)"
+        elif all(v.passed for v in self.viewport_results):
+            vp_status = "All viewports OK"
+        else:
+            vp_status = "Viewport issues detected"
         return f"[{status}] Tests: {self.test_result.passed} | Viewports: {vp_status}"
 
 
@@ -86,6 +118,24 @@ class RootCauseAnalyzer:
             failed_file = pytest_frame.group(1)
             failed_line = int(pytest_frame.group(2))
             target_snippet = pytest_frame.group(4).strip()
+
+        # 1b. Check for Pytest direct test failure line at bottom:
+        # e.g.: test_math.py:3: AssertionError
+        pytest_bottom_frame = re.search(r'([\w/.-]+\.py):(\d+):\s*([A-Za-z_]\w*(?:Error|Exception))', combined)
+        if pytest_bottom_frame:
+            if not failed_file:
+                failed_file = pytest_bottom_frame.group(1)
+            if not failed_line:
+                failed_line = int(pytest_bottom_frame.group(2))
+            error_type = pytest_bottom_frame.group(3)
+            if not target_snippet:
+                snip_match = re.search(r'>\s*([^\n]+)', combined)
+                if snip_match:
+                    target_snippet = snip_match.group(1).strip()
+            if not error_message:
+                err_msg_match = re.search(r'E\s+(?:[A-Za-z_]\w*:\s*)?([^\n]+)', combined)
+                if err_msg_match:
+                    error_message = err_msg_match.group(1).strip()
 
         # 2. Check for standard Python tracebacks (search all frames and pick innermost user frame)
         # Handles <module>, <lambda>, <listcomp>, methods, etc.
@@ -150,11 +200,96 @@ class RootCauseAnalyzer:
             error_type = "ExecutionFailure"
             error_message = combined.strip().splitlines()[-1]
 
+        # 7. Collect all stack frames to distinguish test frames from source frames
+        stack_frames: list[StackFrame] = []
+        source_file: Optional[str] = None
+        source_line: Optional[int] = None
+        source_code_snippet: Optional[str] = None
+        failing_function: Optional[str] = None
+        test_file: Optional[str] = None
+        test_line: Optional[int] = None
+        test_assert_snippet: Optional[str] = None
+
+        def _is_test_file(p: str) -> bool:
+            name = Path(p).name.lower()
+            return "test" in name or "/test/" in p or "/tests/" in p or p.startswith("test_")
+
+        def _is_lib_file(p: str) -> bool:
+            return any(k in p for k in ("_pytest", "unittest", "pluggy", "<frozen", "site-packages"))
+
+        # Parse all pytest frames
+        pytest_matches = list(re.finditer(r'([\w/.-]+\.py):(\d+):\s*in\s*([^\n]+)', combined))
+        for i, m in enumerate(pytest_matches):
+            f_path = m.group(1)
+            f_line = int(m.group(2))
+            f_func = m.group(3).strip()
+            start_pos = m.end()
+            end_pos = pytest_matches[i + 1].start() if i + 1 < len(pytest_matches) else len(combined)
+            frame_body = combined[start_pos:end_pos]
+            snip_match = re.search(r'^\s*>\s*([^\n]+)', frame_body, re.MULTILINE)
+            f_snip = snip_match.group(1).strip() if snip_match else ""
+            stack_frames.append(StackFrame(
+                file_path=f_path,
+                line_number=f_line,
+                function_name=f_func,
+                code_snippet=f_snip,
+                is_test=_is_test_file(f_path),
+            ))
+
+        # Parse all standard python traceback frames
+        for m in tb_matches:
+            f_path = m.group(1)
+            f_line = int(m.group(2))
+            f_func = m.group(3).strip()
+            f_snip = m.group(4).strip()
+            if not _is_lib_file(f_path):
+                stack_frames.append(StackFrame(
+                    file_path=f_path,
+                    line_number=f_line,
+                    function_name=f_func,
+                    code_snippet=f_snip,
+                    is_test=_is_test_file(f_path),
+                ))
+
+        source_frames = [f for f in stack_frames if not f.is_test and not _is_lib_file(f.file_path)]
+        test_frames = [f for f in stack_frames if f.is_test]
+
+        if source_frames:
+            best_source = source_frames[-1]
+            source_file = best_source.file_path
+            source_line = best_source.line_number
+            source_code_snippet = best_source.code_snippet
+            if best_source.function_name and not best_source.function_name.startswith("<"):
+                failing_function = best_source.function_name
+
+        if test_frames:
+            best_test = test_frames[-1]
+            test_file = best_test.file_path
+            test_line = best_test.line_number
+            test_assert_snippet = best_test.code_snippet
+
+        # If failing_function was not in source frame, extract from test assertion or pytest where clause
+        # Supports method invocations like calc.add(), self.service.run(), etc.
+        if not failing_function or failing_function.startswith("<"):
+            where_match = re.search(r'where\s+.*=\s+(?:[A-Za-z_]\w*\.)*([A-Za-z_]\w*)\s*\(', combined)
+            if where_match:
+                failing_function = where_match.group(1)
+            elif target_snippet:
+                assert_match = re.search(r'assert\s+(?:[A-Za-z_]\w*\.)*([A-Za-z_]\w*)\s*\(', target_snippet)
+                if assert_match:
+                    failing_function = assert_match.group(1)
+                else:
+                    call_match = re.search(r'(?:[A-Za-z_]\w*\.)*([A-Za-z_]\w*)\s*\(', target_snippet)
+                    if call_match and call_match.group(1) not in (
+                        "assert", "bool", "int", "str", "len", "float", "list", "dict", "set", "tuple", "isinstance", "type"
+                    ):
+                        failing_function = call_match.group(1)
+
         if has_error:
             recommended_fix = cls._derive_fix(error_type, error_message, target_snippet)
 
             # Get last 20 lines of log
-            lines = [l for l in combined.splitlines() if l.strip()]
+            lines = [line for line in combined.splitlines() if line.strip()]
             snippet = "\n".join(lines[-20:])
 
             return DiagnosticReport(
@@ -166,6 +301,14 @@ class RootCauseAnalyzer:
                 target_code_snippet=target_snippet,
                 recommended_fix=recommended_fix,
                 raw_log_snippet=snippet,
+                source_file=source_file,
+                source_line=source_line,
+                source_code_snippet=source_code_snippet,
+                failing_function=failing_function,
+                test_file=test_file,
+                test_line=test_line,
+                test_assert_snippet=test_assert_snippet,
+                stack_frames=stack_frames,
             )
 
         return DiagnosticReport(has_error=False)
@@ -229,31 +372,26 @@ class VisualRegressionInspector:
     @staticmethod
     def _default_viewport_check(ui_url: str, name: str, width: int, height: int) -> ViewportCheckResult:
         """
-        Default visual layout heuristic inspector.
-        Detects responsiveness and identifies overflow regressions.
-        """
-        Path("/tmp/screenshots").mkdir(parents=True, exist_ok=True)
-        # Detect mobile overflow simulations in test environments
-        if "overflow" in ui_url.lower() and name == "mobile":
-            return ViewportCheckResult(
-                viewport_name=name,
-                width=width,
-                height=height,
-                passed=False,
-                screenshot_path=f"/tmp/screenshots/{name}_{width}x{height}.png",
-                regression_type="HorizontalOverflow",
-                css_selector=".button-group, button",
-                suggested_css_fix="flex-direction: column; width: 100%;",
-                analysis="Mobile viewport (375px) has button overflow: element exceeds 375px viewport.",
-            )
+        No renderer is bundled, so nothing is measured here.
 
+        Earlier versions guessed a layout from the URL string and reported a
+        verified pass. That produced false "visual regression" results, so this
+        backend now states explicitly that the viewport was not inspected.
+        Supply ``custom_checker`` with a real browser backend to measure.
+        """
         return ViewportCheckResult(
             viewport_name=name,
             width=width,
             height=height,
             passed=True,
-            screenshot_path=f"/tmp/screenshots/{name}_{width}x{height}.png",
-            analysis="Layout verified: clean responsiveness, no horizontal overflow.",
+            measured=False,
+            backend="none",
+            screenshot_path=None,
+            analysis=(
+                f"Viewport {name} ({width}x{height}) for '{ui_url}' was not measured: "
+                "no visual backend is configured. Install a browser checker via "
+                "VisualRegressionInspector(custom_checker=...) to verify layout."
+            ),
         )
 
 
@@ -301,6 +439,7 @@ class VerificationEngine:
             viewport_results = await self.visual_inspector.check_viewports(ui_url)
 
         viewports_passed = all(vp.passed for vp in viewport_results) if viewport_results else True
+        viewports_measured = bool(viewport_results) and all(vp.measured for vp in viewport_results)
         all_passed = test_passed and viewports_passed
         requires_healing = not all_passed
 
@@ -309,6 +448,7 @@ class VerificationEngine:
             test_result=test_result,
             diagnostics=diagnostics,
             viewport_results=viewport_results,
+            viewports_measured=viewports_measured,
             requires_healing=requires_healing,
         )
 
