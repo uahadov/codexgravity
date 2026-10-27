@@ -1,0 +1,36 @@
+name: team-review
+
+# Opt-in: set the repository variable CODEX_GRAVITY_REVIEW=true and a
+# GEMINI_API_KEY secret, otherwise this job is skipped.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    if: ${{ vars.CODEX_GRAVITY_REVIEW == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Review the pull request with two agents
+        id: review
+        uses: ./
+        with:
+          # A commit SHA, not a branch name: no attacker-controlled ref reaches a shell.
+          base: ${{ github.event.pull_request.base.sha }}
+          gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
+          reviewers: antigravity,antigravity-pro
+          test-command: ${{ vars.CODEX_GRAVITY_TEST_CMD }}
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "status=${{ steps.review.outputs.status }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "session=${{ steps.review.outputs.session-id }}" >> "$GITHUB_STEP_SUMMARY"

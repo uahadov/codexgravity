@@ -111,6 +111,7 @@ inside the workspace; `.codex-gravity` and `team/` may not be symlinks; writes u
 | `antigravity-cli` | `agentapi new-conversation` (or `CODEX_GRAVITY_ANTIGRAVITY_CLI_CMD` template) | no binary, non-zero exit, empty output, timeout → `ok=False` |
 | `codex-gui` | the ChatGPT/Codex **desktop app** through its own `codex-app-tools` catalogue (runtime tool discovery) | no chat id, no inherited pipe, busy chat, no read tool, or no observable reply → `ok=False`, nothing sent |
 | `antigravity` | `speculative.call_agentapi`, else Google GenAI SDK in a worker thread | no binary/key → `ok=False` with instructions |
+| `antigravity-pro` | same transports, second model (`CODEX_GRAVITY_GEMINI_PRO_MODEL`, default `gemini-2.5-pro`) | used so a CI review has two independent opinions |
 | `antigravity-gui` | `AntigravityGUI.start/poll`, opt-in | wrong model, busy chat, draft, attention state → `ok=False` |
 
 ### Headless servers / CI
@@ -255,6 +256,14 @@ codex-gravity-tui -w /srv/project --follow --timeout 1800    # tail until DONE/E
 
 `python examples/scripted_demo.py` runs a complete session with scripted agents so the
 dashboard can be tried without a model, API key or desktop app.
+
+## 7c. Diff review (gate mode)
+
+`codex-gravity-review` reviews a concrete diff instead of a plan. It reuses the same
+verdict contract and tally, so a change is approved only when every reviewer approved and
+the optional verification command passed. Exit codes: `0` approved, `1` blocked/failed,
+`2` unavailable/empty diff. CI usage (sticky PR comment) is documented in
+**[CI.md](CI.md)**.
 
 ## 8. MCP tools
 

@@ -4,7 +4,7 @@
 
 **Two AI coders that actually talk to each other — plan, argue, cross-examine, agree, then verify.**
 
-[![tests](https://img.shields.io/badge/tests-211%20passing-brightgreen)](.github/workflows/tests.yml)
+[![tests](https://img.shields.io/badge/tests-247%20passing-brightgreen)](.github/workflows/tests.yml)
 [![python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-stdio%20%2B%20http-orange)](docs/TEAMWORK.md)
@@ -145,6 +145,37 @@ Then, from your MCP client:
 Tool: **`team_run_task`**. It returns the full result, and the session stays on disk for
 `team_status`, `team_transcript`, `team_send_message` and `team_cancel`.
 
+## Review a pull request (two agents, one gate)
+
+`codex-gravity-review` reviews **your actual diff** — no plan, no sandbox copy:
+
+```bash
+codex-gravity-review --base origin/main --auto-test      # what a PR would change
+codex-gravity-review --staged                            # the index, before commit
+codex-gravity-review --base HEAD~1 --test-cmd "pytest -q"
+```
+
+It exits `0` only when **every** reviewer approved and the verification command (if any)
+passed; `1` when the change is blocked or the build failed; `2` when no reviewer was
+reachable or the diff was empty. Artefacts: `.codex-gravity/team/<session>/review.md` and
+`transcript.jsonl`.
+
+In CI the bundled Action posts one **sticky comment** per pull request (updated on every
+push) with both verdicts, blocking issues, dissent and the test result:
+
+```yaml
+- uses: actions/checkout@v4
+  with: { fetch-depth: 0 }
+- uses: uahadov/codexgravity@v1
+  with:
+    base: origin/${{ github.base_ref }}
+    gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
+    reviewers: antigravity,antigravity-pro   # two different Gemini models
+    test-command: pytest -q
+```
+
+Setup, inputs and cost notes: **[docs/CI.md](docs/CI.md)**.
+
 ## How the team works
 
 ```
@@ -174,9 +205,12 @@ sender, recipient, round and correlation id. Details:
 
 ## Watch it live — full-screen dashboard
 
+<img src="docs/dashboard.svg" alt="Codex-Gravity dashboard: AGENTS panel, live transcript with PLAN/CRIT/ASK/ANS/REV/PASS badges, STATUS sparkline and VERIFIED consensus panel" width="100%">
+
 On a terminal the run opens a **btop-style dashboard** (curses, no dependencies) that
 redraws 10×/s: agent panel with reachability, live transcript with badges, round
 separators, a message sparkline, the consensus panel and real verification results.
+There is also a recorded walkthrough: `asciinema play docs/demo.cast`.
 
 ```text
 ┌ Codex · Gravity — team session ────────────── session 9f3c1ae0b7d2 · 01:14 ┐
@@ -264,6 +298,7 @@ Badges: `PLAN` `CRIT` `ASK` `ANS` `REV` `PASS` `FAIL` `TEST` `DONE` `ESC` `NOTE`
 | `codex` | same as `codex-cli` | alias, kept for readable configs |
 | `antigravity-cli` | `agentapi`/`agy` (`CODEX_GRAVITY_ANTIGRAVITY_CLI_BIN`) or a command template | **headless servers/CI**: CLI only, no SDK fallback |
 | `antigravity` | agentapi **or** `GEMINI_API_KEY`/`GOOGLE_API_KEY` | best-effort: local CLI first, then the GenAI SDK |
+| `antigravity-pro` | same as `antigravity`, different model | second opinion for CI (default `gemini-2.5-pro`) |
 | `codex-gui` | **ChatGPT/Codex desktop app** (no CLI) | one message into an exact chat UUID, waits for the *new* completed reply; refuses busy chats; never resends |
 | `antigravity-gui` | Antigravity desktop with a loopback DevTools port | opt-in (`--gui`): drives a real visible conversation, refuses a different model/busy chat |
 
@@ -304,7 +339,7 @@ execute commands (`/api/execute-tool`, `/api/studio/run`, `/api/studio/inject`) 
 ```bash
 pip install -e ".[dev]"
 ruff check codex_gravity tests
-pytest -q            # 211 tests, no network, no API keys
+pytest -q            # 247 tests, no network, no API keys
 ```
 
 CI runs lint + tests on Python 3.10 and 3.12. Contributions welcome — see
@@ -313,6 +348,7 @@ CI runs lint + tests on Python 3.10 and 3.12. Contributions welcome — see
 ## Docs
 
 - [docs/TEAMWORK.md](docs/TEAMWORK.md) — protocol, consensus math, transcripts, extending agents
+- [docs/CI.md](docs/CI.md) — two-agent review in CI, Action inputs, credentials, cost
 - README sections below cover the desktop GUI bridge and the legacy router pipeline
 
 ## Desktop helpers (details)

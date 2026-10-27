@@ -23,7 +23,10 @@ def turn(instruction: str = "review the plan") -> AgentTurn:
 
 def test_registry_exposes_both_cli_transports():
     agents = default_agents()
-    assert set(agents) == {"codex", "codex-cli", "codex-gui", "antigravity", "antigravity-cli"}
+    assert set(agents) == {
+        "codex", "codex-cli", "codex-gui",
+        "antigravity", "antigravity-cli", "antigravity-pro",
+    }
     # The CLI name is an explicit alias of the same transport instance.
     assert agents["codex"] is agents["codex-cli"]
 

@@ -281,9 +281,16 @@ class AntigravityAgent(TeamAgent):
 
     name = "antigravity"
 
-    def __init__(self, *, timeout: float = 120.0, model: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        *,
+        timeout: float = 120.0,
+        model: Optional[str] = None,
+        agentapi_model: str = "flash",
+    ) -> None:
         super().__init__(timeout=timeout)
         self.model = model or os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+        self.agentapi_model = agentapi_model
 
     def availability(self) -> tuple[bool, str]:
         if find_agentapi_bin():
@@ -294,7 +301,7 @@ class AntigravityAgent(TeamAgent):
 
     async def _ask(self, turn: AgentTurn, timeout: float) -> AgentReply:
         prompt = _prompt(turn)
-        text = await call_agentapi(prompt, model="flash", timeout_sec=min(timeout, 120.0))
+        text = await call_agentapi(prompt, model=self.agentapi_model, timeout_sec=min(timeout, 120.0))
         if text and text.strip():
             return AgentReply(ok=True, text=text.strip(), engine="antigravity-agentapi")
 
@@ -316,6 +323,23 @@ class AntigravityAgent(TeamAgent):
             ),
             engine="antigravity",
         )
+
+
+class AntigravityProAgent(AntigravityAgent):
+    """Second Gemini model, so a CI review has two genuinely different opinions."""
+
+    name = "antigravity-pro"
+
+    def __init__(self, *, timeout: float = 180.0, model: Optional[str] = None) -> None:
+        super().__init__(
+            timeout=timeout,
+            model=model or os.environ.get("CODEX_GRAVITY_GEMINI_PRO_MODEL", "gemini-2.5-pro"),
+            agentapi_model="pro",
+        )
+
+    def availability(self) -> tuple[bool, str]:
+        ok, reason = super().availability()
+        return ok, reason.replace("antigravity", "antigravity-pro")
 
 
 class AntigravityGUIAgent(TeamAgent):
@@ -410,8 +434,9 @@ def default_agents(
             destination=codex_thread,
             timeout=max(turn_timeout, 300.0),
         ),
-        # Best-effort transport: local agentapi first, then the GenAI SDK.
+        # Best-effort transports: local agentapi first, then the GenAI SDK.
         "antigravity": AntigravityAgent(timeout=min(turn_timeout, 120.0)),
+        "antigravity-pro": AntigravityProAgent(timeout=turn_timeout),
     }
     if gui_agent:
         agents["antigravity-gui"] = AntigravityGUIAgent(timeout=max(turn_timeout, 600.0))

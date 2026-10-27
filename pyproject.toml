@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codex-gravity"
-version = "0.4.0"
+version = "0.5.0"
 description = "Two-way Codex + Antigravity team harness: plan, adversarial review, cross-examination, consensus and real verification over MCP"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -57,6 +57,7 @@ codex-gravity = "codex_gravity.cli:main"
 codex-gravity-mcp = "codex_gravity.mcp_server:main"
 codex-gravity-team = "codex_gravity.team.cli:main"
 codex-gravity-tui = "codex_gravity.tui:main"
+codex-gravity-review = "codex_gravity.team.review_cli:main"
 
 [project.urls]
 Homepage = "https://github.com/codex-gravity/codex-gravity"
@@ -82,3 +83,5 @@ ignore = ["E501"]
 [tool.ruff.lint.per-file-ignores]
 # Compact fixture setup in tests uses one-liners deliberately.
 "tests/*" = ["E701", "E702"]
+# Standalone scripts add the repo root to sys.path before importing the package.
+"scripts/*" = ["E402"]

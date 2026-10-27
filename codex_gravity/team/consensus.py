@@ -338,3 +338,18 @@ def verification_prompt(task: str, command: str, output: str) -> str:
         "Return the complete corrected plan/patch description and a one-line explanation.\n\n"
         f"TASK:\n{task}\n\nCOMMAND:\n{command}\n\nOUTPUT:\n{output[:4000]}"
     )
+
+
+def diff_review_prompt(title: str, diff: str, test_command: Optional[str] = None) -> str:
+    """Gate prompt: judge a concrete diff, not a plan."""
+    ci = f"\nThe CI command that will run afterwards: `{test_command}`\n" if test_command else ""
+    return (
+        "You are an independent reviewer gating a change before merge.\n"
+        "Judge the actual diff below: correctness, edge cases, security, error handling\n"
+        "and whether the tests in the diff actually cover the change.\n"
+        "Quote a file/line when you block something. Ignore pure style preferences.\n"
+        f"{REVIEW_CONTRACT}\n"
+        f"CHANGE: {title}{ci}\n"
+        f"DIFF:\n{diff}"
+    )
+
