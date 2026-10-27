@@ -1,6 +1,6 @@
 # Codex-Gravity
 
-<img src="docs/banner.svg" alt="Codex and Antigravity exchanging questions, answers and revisions until consensus, then verifying" width="100%">
+<img src="docs/social-preview.png" alt="Two coders. One review. — Codex proposes, Gemini blocks with questions, the author revises, then the tests decide" width="100%">
 
 **Two AI coders that check each other's work — before you merge.**
 
@@ -29,7 +29,7 @@ file for every session.
 
 ## How it works
 
-<img src="docs/flow.svg" alt="1 Codex plans, 2 Gemini challenges, 3 they revise together, 4 the tests decide" width="100%">
+<img src="docs/how-it-works.png" alt="01 Plan, 02 Challenge, 03 Revise, 04 Verify — the tests decide" width="100%">
 
 1. **Plan** — Codex writes a concrete plan: files, edge cases, test strategy.
 2. **Challenge** — Gemini reviews it and lists real, blocking problems.
