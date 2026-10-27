@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 280" width="1200" height="280" role="img" aria-label="How Codex-Gravity works: Codex plans, Gemini challenges, the author revises, tests decide">
+  <defs>
+    <linearGradient id="card" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#121218"/>
+      <stop offset="100%" stop-color="#0d0d12"/>
+    </linearGradient>
+    <filter id="soft" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="8" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="280" fill="#070709"/>
+  <rect x="0.5" y="0.5" width="1199" height="279" fill="none" stroke="#ffffff" stroke-opacity="0.07"/>
+
+  <!-- step 1 -->
+  <g transform="translate(30 40)">
+    <rect width="250" height="200" rx="14" fill="url(#card)" stroke="#1f2937"/>
+    <circle cx="34" cy="36" r="15" fill="#111116" stroke="#f97316" stroke-opacity="0.8"/>
+    <text x="34" y="41" text-anchor="middle" font-family="ui-monospace, Menlo, monospace" font-size="13" fill="#f97316">1</text>
+    <g transform="translate(70 20)" stroke="#e5e7eb" stroke-width="2" fill="none" stroke-linecap="round">
+      <rect x="0" y="0" width="28" height="34" rx="4"/>
+      <path d="M6 10h16M6 17h16M6 24h9"/>
+    </g>
+    <text x="24" y="88" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial" font-size="20" font-weight="700" fill="#f4f4f6">Plan</text>
+    <text x="24" y="116" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial" font-size="13.5" fill="#94a3b8">Codex writes a concrete plan:</text>
+    <text x="24" y="138" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial" font-size="13.5" fill="#94a3b8">files, edge cases, test strategy.</text>
+  </g>
+
+  <!-- arrow 1→2 -->
+  <g stroke="#f97316" stroke-opacity="0.55" stroke-width="2" stroke-linecap="round">
+    <path d="M292 140h22"/><path d="M314 140l-8-6v12z" fill="#f97316" stroke="none" fill-opacity="0.8"/>
+  </g>
+
+  <!-- step 2 -->
+  <g transform="translate(325 40)">
+    <rect width="250" height="200" rx="14" fill="url(#card)" stroke="#1f2937"/>
+    <circle cx="34" cy="36" r="15" fill="#111116" stroke="#f97316" stroke-opacity="0.8"/>
+    <text x="34" y="41" text-anchor="middle" font-family="ui-monospace, Menlo, monospace" font-size="13" fill="#f97316">2</text>
+    <g transform="translate(70 20)" stroke="#ef4444" stroke-width="2" fill="none" stroke-linecap="round">
+      <path d="M0 26l10-22 10 22z"/>
+      <path d="M10 12v7"/><circle cx="10" cy="23" r="0.9" fill="#ef4444" stroke="none"/>
+    </g>
+    <text x="24" y="88" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial" font-size="20" font-weight="700" fill="#f4f4f6">Challenge</text>
+    <text x="24" y="116" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial" font-size="13.5" fill="#94a3b8">Gemini reviews it and lists real</text>
+    <text x="24" y="138" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial" font-size="13.5" fill="#94a3b8">problems — or the plan stays blocked.</text>
+  </g>
+
+  <!-- arrow 2→3 -->
+  <g stroke="#f97316" stroke-opacity="0.55" stroke-width="2" stroke-linecap="round">
+    <path d="M587 140h22"/><path d="M609 140l-8-6v12z" fill="#f97316" stroke="none" fill-opacity="0.8"/>
+  </g>
+
+  <!-- step 3 -->
+  <g transform="translate(620 40)">
+    <rect width="250" height="200" rx="14" fill="url(#card)" stroke="#1f2937"/>
+    <circle cx="34" cy="36" r="15" fill="#111116" stroke="#f97316" stroke-opacity="0.8"/>
+    <text x="34" y="41" text-anchor="middle" font-family="ui-monospace, Menlo, monospace" font-size="13" fill="#f97316">3</text>
+    <g transform="translate(70 20)" stroke="#22d3ee" stroke-width="2" fill="none" stroke-linecap="round">
+      <path d="M20 8a10 10 0 1 1-6-3"/><path d="M14 1v6h6"/>
+    </g>
+    <text x="24" y="88" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial" font-size="20" font-weight="700" fill="#f4f4f6">Answer &amp; revise</text>
+    <text x="24" y="116" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial" font-size="13.5" fill="#94a3b8">They ask each other questions.</text>
+    <text x="24" y="138" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial" font-size="13.5" fill="#94a3b8">The author fixes what is weak.</text>
+  </g>
+
+  <!-- arrow 3→4 -->
+  <g stroke="#f97316" stroke-opacity="0.55" stroke-width="2" stroke-linecap="round">
+    <path d="M882 140h22"/><path d="M904 140l-8-6v12z" fill="#f97316" stroke="none" fill-opacity="0.8"/>
+  </g>
+
+  <!-- step 4 -->
+  <g transform="translate(915 40)">
+    <rect width="250" height="200" rx="14" fill="url(#card)" stroke="#f97316" stroke-opacity="0.3"/>
+    <circle cx="34" cy="36" r="15" fill="#111116" stroke="#22c55e" stroke-opacity="0.9"/>
+    <text x="34" y="41" text-anchor="middle" font-family="ui-monospace, Menlo, monospace" font-size="13" fill="#22c55e">4</text>
+    <g transform="translate(70 22)" stroke="#22c55e" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round" filter="url(#soft)">
+      <path d="M2 13l7 7L22 4"/>
+    </g>
+    <text x="24" y="88" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial" font-size="20" font-weight="700" fill="#f4f4f6">Verify</text>
+    <text x="24" y="116" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial" font-size="13.5" fill="#94a3b8">Only then: run the real tests.</text>
+    <text x="24" y="138" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial" font-size="13.5" fill="#94a3b8">Exit code 0, or it is not verified.</text>
+  </g>
+
+  <text x="600" y="268" text-anchor="middle" font-family="ui-monospace, Menlo, monospace" font-size="11.5" fill="#5e5e68" letter-spacing="1">EVERY MESSAGE IS SAVED · YOU CAN READ THE WHOLE DEBATE LATER</text>
+</svg>

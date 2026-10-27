@@ -2,7 +2,10 @@
 
 <img src="docs/banner.svg" alt="Codex and Antigravity exchanging questions, answers and revisions until consensus, then verifying" width="100%">
 
-**Two AI coders that actually talk to each other — plan, argue, cross-examine, agree, then verify.**
+**Two AI coders that check each other's work — before you merge.**
+
+One writes the plan. The other tries to break it. They ask each other questions, fix what
+is weak, and only then run your tests. You can read the whole conversation afterwards.
 
 [![tests](https://img.shields.io/badge/tests-247%20passing-brightgreen)](.github/workflows/tests.yml)
 [![python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](pyproject.toml)
@@ -10,53 +13,60 @@
 [![MCP](https://img.shields.io/badge/MCP-stdio%20%2B%20http-orange)](docs/TEAMWORK.md)
 [![lint](https://img.shields.io/badge/ruff-clean-261230)](pyproject.toml)
 
-Codex-Gravity wires **OpenAI Codex** and **Google Antigravity (Gemini)** into one
-engineering team instead of a one-way "send this to that model" pipe:
+## What is this?
 
-- **Both directions, always.** Either agent can plan, implement, review, judge or ask
-  the other a question — and the answer is recorded under one correlation id.
-- **Nothing gets approved by accident.** A reviewer's approval is a parsed, structured
-  verdict. Unparsable, empty or contradictory reviews never count as approval.
-- **The plan is tested, not trusted.** After consensus the team runs a real command
-  and reports the exit code. If it fails, a repair round runs or the session fails.
+A single AI assistant will happily tell you "done" even when the code is broken —
+because nobody is checking.
 
-```console
-$ codex-gravity-team "Add retry handling to the HTTP client" -w . --test-cmd "pytest -q"
-Transports:
-  - antigravity        ready        Antigravity agentapi binary found
-  - codex              ready        codex CLI found (sign-in is verified on the first turn)
+Codex-Gravity gives it a teammate with a different opinion. Codex proposes; Gemini
+reviews like a strict senior engineer — *"no test for the timeout case, and which backoff
+did you pick?"* The author answers, revises, and the reviewer approves… or the change
+stays blocked. Then a real command (`pytest`, `npm test`, your CI script) decides whether
+it actually works.
 
-========================================================================
-Status: VERIFIED   rounds: 2   session: 9f3c1ae0b7d2
-Decision: Unanimous approval.
-Approved by: antigravity, codex
-Verification: `pytest -q` -> exit 0 (PASS) in 4.31s
-========================================================================
+No dashboard to host, no database, no account: one MCP server, one CLI, and a transcript
+file for every session.
 
---- Final proposal ---
-1. Wrap requests in `retry.py` with exponential backoff + jitter.
-2. Retry only 429/5xx/timeouts; never retry 4xx.
-3. Tests: timeout, 500, exhausted budget, no-retry-on-400.
+## How it works
 
-Transcript: .codex-gravity/team/9f3c1ae0b7d2/transcript.jsonl
-Report:     .codex-gravity/team/9f3c1ae0b7d2/report.md
+<img src="docs/flow.svg" alt="1 Codex plans, 2 Gemini challenges, 3 they revise together, 4 the tests decide" width="100%">
+
+1. **Plan** — Codex writes a concrete plan: files, edge cases, test strategy.
+2. **Challenge** — Gemini reviews it and lists real, blocking problems.
+3. **Answer & revise** — questions are answered and the weak parts are rewritten.
+4. **Verify** — only after agreement, the real test command runs. `exit 0`, or it is not verified.
+
+## See it
+
+<img src="docs/dashboard.svg" alt="Codex-Gravity dashboard: AGENTS panel, live transcript with PLAN/CRIT/ASK/ANS/REV/PASS badges, STATUS sparkline and VERIFIED consensus panel" width="100%">
+
+That is a live terminal dashboard (nothing extra to install): who is available, what they
+are saying right now, the round counter and the final verdict with the test result.
+
+## Try it in 30 seconds
+
+No API keys, no accounts — the demo agents are scripted, everything else is real:
+
+```bash
+git clone https://github.com/uahadov/codexgravity.git
+cd codexgravity
+python3 -m venv .venv && source .venv/bin/activate   # fish: source .venv/bin/activate.fish
+pip install -e .
+python examples/scripted_demo.py
 ```
 
-*(Abridged output shape; your agents' wording will differ.)*
+Press `q` to leave the dashboard.
 
-## Why this exists
+## Why two models?
 
-Most "multi-agent" projects are a fan-out: one model asks another and hopes for the
-best. Codex-Gravity treats the pair as a **review culture**:
+- A model that checks itself agrees with itself. A *different* model does not.
+- "Looks good" is not a review. Here a review is a verdict with blocking issues — or it is not an approval.
+- Talking is cheap, tests are not. The team only claims success when the command exits `0`.
 
-| Problem with naive chaining | What this harness does |
-| --- | --- |
-| A model says "looks good" and nobody checks | Reviewers must emit `{verdict, blocking_issues, questions}`; approval with blockers is demoted to `revise` |
-| Reviewers can't interrogate the author | **Cross-examination**: reviewer questions → implementer answers → answers become revision context |
-| "Consensus" is whatever the last model said | Weighted/unanimous tally, veto agents, recorded dissent, optional judge, explicit deadlock |
-| Nobody runs the tests | Post-consensus verification with real exit codes and a bounded repair budget |
-| You can't audit what happened | Append-only JSONL transcript + `report.md` + `result.json`, private permissions |
-| Agents lie when a transport is down | Every adapter returns `ok=False` with a reason; sessions report `unavailable`, never a fake answer |
+---
+
+**Below is the technical reference**: install options, the pull-request review gate, MCP
+tools, transports and the exact guarantees.
 
 ## Features
 
@@ -75,6 +85,17 @@ best. Codex-Gravity treats the pair as a **review culture**:
 - **EventBus mirroring** — every team message also appears on the Studio dashboard.
 - **MCP native** — six `team_*` tools; works from Codex, Claude Desktop or any MCP client.
 - **Offline-testable** — the engine is agent-agnostic; the suite runs with scripted agents.
+
+## Compared to naive chaining
+
+| Problem with naive chaining | What this harness does |
+| --- | --- |
+| A model says "looks good" and nobody checks | Reviewers must emit `{verdict, blocking_issues, questions}`; approval with blockers is demoted to `revise` |
+| Reviewers can't interrogate the author | **Cross-examination**: reviewer questions → implementer answers → answers become revision context |
+| "Consensus" is whatever the last model said | Weighted/unanimous tally, veto agents, recorded dissent, optional judge, explicit deadlock |
+| Nobody runs the tests | Post-consensus verification with real exit codes and a bounded repair budget |
+| You can't audit what happened | Append-only JSONL transcript + `report.md` + `result.json`, private permissions |
+| Agents lie when a transport is down | Every adapter returns `ok=False` with a reason; sessions report `unavailable`, never a fake answer |
 
 ## Quickstart
 
@@ -176,7 +197,7 @@ push) with both verdicts, blocking issues, dissent and the test result:
 
 Setup, inputs and cost notes: **[docs/CI.md](docs/CI.md)**.
 
-## How the team works
+## Inside a round
 
 ```
               ┌──────────────────────── Codex-Gravity ────────────────────────┐
@@ -203,9 +224,7 @@ Every step writes a typed message (`proposal`, `critique`, `question`, `answer`,
 sender, recipient, round and correlation id. Details:
 **[docs/TEAMWORK.md](docs/TEAMWORK.md)**.
 
-## Watch it live — full-screen dashboard
-
-<img src="docs/dashboard.svg" alt="Codex-Gravity dashboard: AGENTS panel, live transcript with PLAN/CRIT/ASK/ANS/REV/PASS badges, STATUS sparkline and VERIFIED consensus panel" width="100%">
+## Dashboard details (keys, replay, fallback)
 
 On a terminal the run opens a **btop-style dashboard** (curses, no dependencies) that
 redraws 10×/s: agent panel with reachability, live transcript with badges, round
