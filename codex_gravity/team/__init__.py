@@ -13,6 +13,8 @@ from codex_gravity.team.agents import (
     default_agents,
     resolve_agents,
 )
+from codex_gravity.team.compare import recent_sessions, snapshot
+from codex_gravity.team.config import DEFAULT_POLICY, load_policy, policy_path, write_policy
 from codex_gravity.team.consensus import (
     ConsensusDecision,
     ReviewFinding,
@@ -30,6 +32,7 @@ from codex_gravity.team.protocol import (
     TeamTranscript,
     new_session_id,
 )
+from codex_gravity.team.report import load_result, render_session_html, write_report
 from codex_gravity.team.session import (
     TeamConfig,
     TeamOrchestrator,
@@ -47,6 +50,7 @@ __all__ = [
     "CodexAgent",
     "CodexGUIAgent",
     "ConsensusDecision",
+    "DEFAULT_POLICY",
     "Kind",
     "ReviewFinding",
     "Role",
@@ -61,9 +65,17 @@ __all__ = [
     "Verdict",
     "VerificationRecord",
     "default_agents",
+    "load_policy",
+    "load_result",
     "new_session_id",
     "parse_review",
+    "policy_path",
+    "recent_sessions",
+    "render_session_html",
     "resolve_agents",
     "run_verification",
+    "snapshot",
     "tally",
+    "write_policy",
+    "write_report",
 ]

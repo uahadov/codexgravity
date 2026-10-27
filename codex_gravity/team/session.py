@@ -21,7 +21,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field, field_validator
 
 from codex_gravity.event_bus import EventBus
-from codex_gravity.team.agents import AgentTurn, TeamAgent, default_agents
+from codex_gravity.team.agents import AgentReply, AgentTurn, TeamAgent, default_agents
 from codex_gravity.team.consensus import (
     ConsensusDecision,
     ReviewFinding,
@@ -35,6 +35,7 @@ from codex_gravity.team.consensus import (
     tally,
     verification_prompt,
 )
+from codex_gravity.team.memory import append_decision, load_decisions
 from codex_gravity.team.protocol import (
     ALL,
     Kind,
@@ -46,7 +47,9 @@ from codex_gravity.team.protocol import (
     new_session_id,
 )
 
-TeamStatus = Literal["consensus", "verified", "deadlocked", "unavailable", "failed", "cancelled"]
+TeamStatus = Literal[
+    "consensus", "verified", "deadlocked", "unavailable", "failed", "cancelled", "budget_exhausted",
+]
 
 
 class TeamConfig(BaseModel):
@@ -73,6 +76,10 @@ class TeamConfig(BaseModel):
     verification_timeout: float = 300.0
     session_id: Optional[str] = None
     write_report: bool = True
+    # Run budget: 0 means unlimited. Exhaustion stops the run without a verdict.
+    max_agent_calls: int = 0
+    budget_minutes: float = 0.0
+    remember_decisions: bool = True
 
     @field_validator("task")
     @classmethod
@@ -121,6 +128,20 @@ class TeamConfig(BaseModel):
             raise ValueError("verification_retries must be between 0 and 3")
         return value
 
+    @field_validator("max_agent_calls")
+    @classmethod
+    def _calls(cls, value: int) -> int:
+        if not 0 <= value <= 500:
+            raise ValueError("max_agent_calls must be between 0 (unlimited) and 500")
+        return value
+
+    @field_validator("budget_minutes")
+    @classmethod
+    def _budget(cls, value: float) -> float:
+        if not 0 <= value <= 600:
+            raise ValueError("budget_minutes must be between 0 (unlimited) and 600")
+        return value
+
 
 class VerificationRecord(BaseModel):
     command: str
@@ -147,6 +168,7 @@ class TeamResult(BaseModel):
     transcript_messages: int = 0
     transcript_path: str = ""
     report_path: Optional[str] = None
+    decision_memory: Optional[str] = None
     next_actions: list[str] = Field(default_factory=list)
     elapsed_seconds: float = 0.0
 
@@ -214,6 +236,48 @@ def _format_finding(finding: ReviewFinding) -> str:
     return "\n\n".join(parts)
 
 
+class _BudgetedAgent:
+    """Agent proxy that charges every turn against the run budget.
+
+    Exhaustion is not an exception and not a fake answer: the turn fails with an
+    explicit error, every later turn fails the same way, and the run ends as
+    ``budget_exhausted`` instead of pretending a review happened.
+    """
+
+    def __init__(
+        self,
+        agent: TeamAgent,
+        budget: dict,
+        max_calls: int,
+        deadline: Optional[float],
+    ) -> None:
+        self._agent = agent
+        self._budget = budget
+        self._max_calls = max_calls
+        self._deadline = deadline
+
+    @property
+    def name(self) -> str:
+        return self._agent.name
+
+    def describe(self) -> dict:
+        return self._agent.describe()
+
+    async def respond(self, turn: AgentTurn) -> AgentReply:
+        if self._budget["stopped"]:
+            return AgentReply(ok=False, error=self._budget["stopped"], engine=self.name)
+        reason = ""
+        if self._max_calls and self._budget["calls"] >= self._max_calls:
+            reason = f"call budget exhausted ({self._max_calls} agent calls)"
+        elif self._deadline is not None and time.monotonic() > self._deadline:
+            reason = "run deadline reached"
+        if reason:
+            self._budget["stopped"] = reason
+            return AgentReply(ok=False, error=reason, engine=self.name)
+        self._budget["calls"] += 1
+        return await self._agent.respond(turn)
+
+
 class TeamOrchestrator:
     """Runs a Codex + Antigravity team session and exposes it over CLI/MCP."""
 
@@ -260,6 +324,7 @@ class TeamOrchestrator:
         verification: Optional[VerificationRecord],
         next_actions: list[str],
         started: float,
+        decision_memory: Optional[str] = None,
     ) -> TeamResult:
         report_path = None
         if config.write_report:
@@ -287,6 +352,7 @@ class TeamOrchestrator:
             transcript_messages=len(transcript.messages()),
             transcript_path=str(transcript.path),
             report_path=report_path,
+            decision_memory=decision_memory,
             next_actions=next_actions,
             elapsed_seconds=round(time.perf_counter() - started, 2),
         )
@@ -309,6 +375,17 @@ class TeamOrchestrator:
         channel = TeamChannel(transcript, self.event_bus)
         key = (str(transcript.workspace), session_id)
         self._active[key] = channel
+
+        budget: dict = {"calls": 0, "stopped": ""}
+        deadline = time.monotonic() + config.budget_minutes * 60 if config.budget_minutes else None
+
+        def charge(agent: TeamAgent) -> _BudgetedAgent:
+            return _BudgetedAgent(agent, budget, config.max_agent_calls, deadline)
+
+        planner = charge(planner)
+        implementer = charge(implementer)
+        reviewers = [charge(reviewer) for reviewer in reviewers]
+        decisions_text = load_decisions(transcript.workspace) if config.remember_decisions else ""
         descriptions = {name: agent.describe() for name, agent in pool.items() if name in {
             config.plan_with, config.implement_with, *config.review_with,
             *([config.judge_with] if config.judge_with else []),
@@ -323,7 +400,7 @@ class TeamOrchestrator:
             plan_reply = await planner.respond(
                 AgentTurn(
                     task=config.task,
-                    instruction=proposal_prompt(config.task),
+                    instruction=proposal_prompt(config.task, decisions=decisions_text),
                     context=transcript.render(),
                     workspace=transcript.workspace,
                     role=Role.PLANNER,
@@ -344,7 +421,9 @@ class TeamOrchestrator:
                     unavailable=[planner.name],
                 )
                 return self._finish(
-                    transcript=transcript, config=config, status="unavailable", rounds=0,
+                    transcript=transcript, config=config, status=(
+                        "budget_exhausted" if budget["stopped"] else "unavailable"
+                    ), rounds=0,
                     proposal="", decision=decision, findings=[], agents=descriptions,
                     verification=None,
                     next_actions=[
@@ -372,7 +451,7 @@ class TeamOrchestrator:
                 for reviewer in reviewers:
                     turn = AgentTurn(
                         task=config.task,
-                        instruction=review_prompt(config.task, proposal, notes),
+                        instruction=review_prompt(config.task, proposal, notes, decisions=decisions_text),
                         context=transcript.render(),
                         workspace=transcript.workspace,
                         role=Role.REVIEWER,
@@ -454,7 +533,9 @@ class TeamOrchestrator:
                 revise_reply = await implementer.respond(
                     AgentTurn(
                         task=config.task,
-                        instruction=revision_prompt(config.task, proposal, findings, answers, notes),
+                        instruction=revision_prompt(
+                            config.task, proposal, findings, answers, notes, decisions=decisions_text
+                        ),
                         context=transcript.render(),
                         workspace=transcript.workspace,
                         role=Role.IMPLEMENTER,
@@ -478,8 +559,8 @@ class TeamOrchestrator:
                     )
 
             # -- optional judge on deadlock ------------------------------
-            if not decision.achieved and config.judge_with:
-                judge = self._agent(pool, config.judge_with)
+            if not decision.achieved and config.judge_with and not budget["stopped"]:
+                judge = charge(self._agent(pool, config.judge_with))
                 judge_reply = await judge.respond(
                     AgentTurn(
                         task=config.task,
@@ -519,7 +600,7 @@ class TeamOrchestrator:
 
             # -- real verification --------------------------------------
             verification: Optional[VerificationRecord] = None
-            if config.test_command and decision.achieved:
+            if config.test_command and decision.achieved and not budget["stopped"]:
                 verification = await run_verification(
                     config.test_command, transcript.workspace, config.verification_timeout
                 )
@@ -565,7 +646,13 @@ class TeamOrchestrator:
                     )
 
             # -- status --------------------------------------------------
-            if channel.cancelled:
+            if budget["stopped"]:
+                status = "budget_exhausted"
+                next_actions = [
+                    f"The run stopped before a verdict: {budget['stopped']}.",
+                    "Nothing beyond the recorded rounds was agreed; raise the budget or split the task.",
+                ]
+            elif channel.cancelled:
                 status: TeamStatus = "cancelled"
                 next_actions = ["The session was cancelled; rerun to reach a decision."]
             elif not decision.achieved:
@@ -587,6 +674,37 @@ class TeamOrchestrator:
                     "Keep the transcript for audit; it records every review and answer.",
                 ]
 
+            # Side notes first, so the verdict is the last line of the transcript.
+            if budget["stopped"]:
+                await channel.send(
+                    "orchestrator", ALL, Kind.STATUS,
+                    f"Stopped by budget: {budget['stopped']} (after {budget['calls']} agent calls).",
+                    round=rounds, role=Role.SYSTEM,
+                )
+
+            memory_path: Optional[str] = None
+            if config.remember_decisions and status in ("consensus", "verified"):
+                try:
+                    memory_path = str(append_decision(
+                        transcript.workspace,
+                        task=config.task,
+                        session_id=session_id,
+                        status=status,
+                        approvals=decision.approvals,
+                        proposal=proposal,
+                        verification=config.test_command if verification is not None else None,
+                    ))
+                    await channel.send(
+                        "orchestrator", ALL, Kind.STATUS,
+                        f"Decision recorded in {memory_path}",
+                        round=rounds, role=Role.SYSTEM,
+                    )
+                except TeamError as error:
+                    await channel.send(
+                        "orchestrator", ALL, Kind.STATUS,
+                        f"Decision memory not written: {error}", round=rounds, role=Role.SYSTEM,
+                    )
+
             if decision.achieved:
                 await channel.send(
                     "orchestrator", ALL, Kind.CONSENSUS,
@@ -607,7 +725,7 @@ class TeamOrchestrator:
                 transcript=transcript, config=config, status=status, rounds=rounds,
                 proposal=proposal, decision=decision, findings=findings,
                 agents=descriptions, verification=verification,
-                next_actions=next_actions, started=started,
+                next_actions=next_actions, started=started, decision_memory=memory_path,
             )
         finally:
             self._active.pop(key, None)

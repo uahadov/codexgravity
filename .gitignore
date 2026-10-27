@@ -9,7 +9,10 @@ dist/
 build/
 .coverage
 htmlcov/
-.codex-gravity/
+# Runtime sessions stay local; the team policy and decision log are committed.
+.codex-gravity/*
+!.codex-gravity/team.json
+!.codex-gravity/decisions.md
 # Local secrets: .env holds provider keys and must never be committed.
 .env
 .env.local

@@ -68,6 +68,7 @@ STATUS_COLORS = {
     "deadlocked": COLOR_RED,
     "failed": COLOR_RED,
     "unavailable": COLOR_RED,
+    "budget_exhausted": "\033[38;5;214m",
     "cancelled": "\033[38;5;220m",
 }
 

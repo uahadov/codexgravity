@@ -92,15 +92,96 @@ Dissent (`decision.dissent`) and blockers (`decision.blockers`) are always retur
 ## 5. On-disk artefacts
 
 ```
-<workspace>/.codex-gravity/team/<session_id>/
-├── transcript.jsonl   # append-only, mode 0600, one TeamMessage per line
-├── report.md          # human summary + full rendered transcript
-└── result.json        # the TeamResult object
+<workspace>/.codex-gravity/
+├── team.json          # committed policy: roles, weights, rounds, budget
+├── decisions.md       # committed decision log (accepted sessions)
+└── team/<session_id>/
+    ├── transcript.jsonl   # append-only, mode 0600, one TeamMessage per line
+    ├── report.md          # human summary + full rendered transcript
+    ├── report.html        # optional: one self-contained page (codex-gravity-report)
+    └── result.json        # the TeamResult object
 ```
 
 Guarantees: `session_id` must match `^[a-f0-9]{12}$`; the session directory must stay
 inside the workspace; `.codex-gravity` and `team/` may not be symlinks; writes use
 `O_NOFOLLOW`. Corrupt lines are skipped rather than crashing a reader.
+
+## 5b. Project policy (`team.json`)
+
+```bash
+codex-gravity-team --init -w . --test-cmd "pytest -q"   # write defaults + your test command
+codex-gravity-team --init -w . --force                 # overwrite
+codex-gravity-team "…" -w . --dry-run                   # resolved plan, zero model calls
+```
+
+```json
+{
+  "plan_with": "codex",
+  "implement_with": "antigravity",
+  "review_with": ["codex", "antigravity"],
+  "judge_with": null,
+  "reviewer_weights": {"codex": 2},
+  "veto_agents": ["antigravity"],
+  "max_rounds": 3,
+  "require_unanimous": true,
+  "test_command": "pytest -q",
+  "turn_timeout": 180,
+  "verification_retries": 1,
+  "codex_thread": null,
+  "max_agent_calls": 0,
+  "budget_minutes": 0,
+  "remember_decisions": true
+}
+```
+
+Precedence: **flags > `team.json` > built-in defaults**. Unknown keys and out-of-range
+values are rejected (`exit 2`) instead of being silently ignored, so a typo cannot quietly
+disable a veto. `--dry-run` prints the effective plan plus transport reachability and
+stops there.
+
+## 5c. Budgets
+
+`--max-calls N` and/or `--budget-minutes M` bound the run. Each agent turn is charged
+before it is sent; when the budget is gone:
+
+- the turn fails with an explicit `ok=False, error="call budget exhausted…"`;
+- no further reviewer/judge/repair calls are made;
+- verification is skipped (it cannot prove a verdict that was never reached);
+- the result status is **`budget_exhausted`** — not `consensus`, not `deadlocked`;
+- the transcript records `Stopped by budget: … (after N agent calls)`.
+
+## 5d. Decision memory (`decisions.md`)
+
+A session that ends `consensus` or `verified` appends a dated entry: task, session id,
+status, approvals, verification command, and the first few decision-like lines of the
+final proposal. The next session passes the last 8 entries to the planner, reviewers and
+implementer under `PROJECT DECISIONS ALREADY MADE`, with the instruction not to re-open
+them unless the task contradicts them.
+
+Write or read failures never fail the session: they are recorded as a `status` message
+and `result.decision_memory` stays `null`. `--no-remember` (or
+`"remember_decisions": false`) disables both reading and writing for a run.
+
+Long-lived projects should keep this file under review like code: it is context, and stale
+entries will steer the team.
+
+## 5e. Report and compare
+
+```bash
+codex-gravity-report -w .                       # latest session → report.html
+codex-gravity-report -w . --session 9f3c1ae0b7d2 -o /tmp/audit.html
+codex-gravity-compare -w .                      # two most recent sessions
+codex-gravity-compare -w . 9f3c1ae0b7d2 41ab7cde9012 --json
+```
+
+The report is static HTML with inline CSS: verdict card, blocking issues, per-reviewer
+findings, the real verification output and the transcript. Model output is HTML-escaped and
+long bodies/messages are clipped, so attaching it is safe. It also renders diff-review
+sessions (findings instead of a proposal).
+
+`codex-gravity-compare` answers "what changed": status transition, resolved and newly
+introduced blockers, approval delta, verification change and a bounded unified diff of the
+proposal.
 
 ## 6. Transports
 
@@ -265,6 +346,18 @@ the optional verification command passed. Exit codes: `0` approved, `1` blocked/
 `2` unavailable/empty diff. CI usage (sticky PR comment) is documented in
 **[CI.md](CI.md)**.
 
+## 7d. Report, compare, replay
+
+```bash
+codex-gravity-report -w /srv/project                    # latest session → report.html
+codex-gravity-report -w /srv/project --session 9f3c1ae0b7d2 -o audit.html
+codex-gravity-compare -w /srv/project                   # two most recent sessions
+codex-gravity-compare -w /srv/project 9f3c1ae0b7d2 41ab7cde9012 --json
+```
+
+Both read only from disk, so they work on a server that never runs a model.
+`scripts/render_report_demo.py` regenerates the example report in the README.
+
 ## 8. MCP tools
 
 ```jsonc
@@ -287,6 +380,11 @@ the optional verification command passed. Exit codes: `0` approved, `1` blocked/
 {"workspace_path": "/abs/project", "session_id": "9f3c1ae0b7d2",
  "sender": "human", "recipient": "all", "kind": "note",
  "body": "Do not touch the billing module."}
+
+// team_report / team_compare / team_decisions - artefacts from disk
+{"workspace_path": "/abs/project", "session_id": "9f3c1ae0b7d2"}
+{"workspace_path": "/abs/project", "session_id": "9f3c1ae0b7d2", "against": "41ab7cde9012"}
+{"workspace_path": "/abs/project", "limit": 8}
 ```
 
 `team_status` and `team_transcript` read from disk, so they work in a fresh process.

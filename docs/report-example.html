@@ -1,0 +1,153 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Add retry handling with jitter to the HTTP client — Codex-Gravity</title>
+<style>
+
+:root{--paper:#f4f0e9;--ink:#14120f;--muted:#6f6657;--line:rgba(20,18,15,.13);--card:#fffdf8}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--paper);color:var(--ink);font:16px/1.55 ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif;
+     padding:48px 24px 72px;background-image:linear-gradient(to right,rgba(20,18,15,.04) 1px,transparent 1px),
+     linear-gradient(to bottom,rgba(20,18,15,.04) 1px,transparent 1px);background-size:64px 64px}
+.wrap{max-width:900px;margin:0 auto}
+.eyebrow{font-size:11.5px;letter-spacing:.18em;text-transform:uppercase;color:#7a7264}
+h1{font-size:44px;line-height:1.02;letter-spacing:-.03em;margin:14px 0 10px;font-weight:800}
+.meta{font-size:12.5px;color:var(--muted);letter-spacing:.04em}
+.rule{height:1px;background:var(--line);margin:26px 0}
+.verdict{border:1px solid var(--line);background:var(--card);border-left:6px solid currentColor;
+         padding:20px 22px;box-shadow:0 24px 40px -30px rgba(40,30,15,.5)}
+.status{font-size:13px;letter-spacing:.16em;text-transform:uppercase;font-weight:700;color:currentColor}
+.reason{margin-top:8px;font-size:18px;font-weight:600}
+.sub{font-size:13.5px;color:var(--muted);margin-top:8px}
+ul{margin:10px 0 0 18px}li{margin:4px 0;font-size:14px}
+.verify{border:1px solid var(--line);background:#0d0c0b;color:#f7f3ea;padding:18px 20px;margin-top:18px}
+.verify .cmd{font:13.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:#c9c1b2}
+.verify .exit{font-size:26px;font-weight:800;letter-spacing:-.02em;margin-top:6px}
+.verify pre{margin-top:12px;font:12px/1.5 ui-monospace,Menlo,monospace;color:#a9a193;white-space:pre-wrap;max-height:220px;overflow:auto}
+table{width:100%;border-collapse:collapse;margin-top:18px;font-size:13.5px;background:var(--card);border:1px solid var(--line)}
+th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+.msg{display:grid;grid-template-columns:104px 74px 1fr;gap:12px;padding:12px 0;border-bottom:1px solid var(--line)}
+.time{font:11.5px/1.6 ui-monospace,Menlo,monospace;color:var(--muted)}
+.badge{font:11px/1.6 ui-monospace,Menlo,monospace;letter-spacing:.1em;color:#7a3f12}
+.who{font-size:12.5px;color:var(--muted);letter-spacing:.03em}
+.body{grid-column:1/-1;font:13px/1.6 ui-monospace,Menlo,monospace;white-space:pre-wrap;margin-top:6px;
+      background:#fbf8f1;border:1px solid var(--line);padding:10px 12px}
+footer{margin-top:36px;font-size:11.5px;color:#8b8272;letter-spacing:.05em}
+
+</style></head><body><div class="wrap">
+<div class="eyebrow">Codex-Gravity · session report · 2026-10-28</div>
+<h1>Add retry handling with jitter to the HTTP client</h1>
+<div class="meta">11 messages · rounds 2 · 0.02s · session 0b3b8963a567</div>
+<div class="rule"></div>
+<div class="verdict" style="color:#1f7a4d">
+<div class="status">verified</div>
+<div class="reason">Unanimous approval.</div>
+<div class="sub">Approved by codex, antigravity</div>
+</div>
+<table><thead><tr><th>reviewer</th><th>verdict</th><th>summary</th></tr></thead><tbody>
+<tr><td>codex</td><td>approve</td><td>Timeboxed and testable as written.</td></tr>
+<tr><td>antigravity</td><td>approve</td><td>Timeboxed and testable as written.</td></tr>
+</tbody></table>
+<div class="verify">
+<div class="eyebrow" style="color:#f26419">verification</div>
+<div class="cmd">$ python3 -c &quot;print(&#x27;14 passed in 0.42s&#x27;)&quot;</div>
+<div class="exit" style="color:#1f7a4d">exit 0 <span style="font-size:13px;color:#8a8172">0.019s</span></div>
+<pre>14 passed in 0.42s</pre>
+</div>
+<div class="rule"></div><div class="eyebrow">transcript</div>
+<div class="msg">
+<div class="time">r0 · 02:30:19</div>
+<div class="badge">TASK</div>
+<div class="who">orchestrator → all</div>
+<div class="body">Add retry handling with jitter to the HTTP client</div>
+</div>
+<div class="msg">
+<div class="time">r0 · 02:30:19</div>
+<div class="badge">PLAN</div>
+<div class="who">codex → all</div>
+<div class="body"># Plan — retries for the HTTP client
+
+1. Add `RetryPolicy(max_attempts=4, base_delay=0.2, max_delay=5)` in `http/retry.py`.
+2. Retry on `TimeoutError` and 5xx, with exponential backoff and full jitter.
+3. Do not retry non-idempotent POSTs unless the caller passes `idempotent=True`.
+4. Tests: timeout, 5xx, 429 with `Retry-After`, and a budget-exhausted case.</div>
+</div>
+<div class="msg">
+<div class="time">r1 · 02:30:19</div>
+<div class="badge">PASS</div>
+<div class="who">codex → codex</div>
+<div class="body">verdict: approve
+
+Timeboxed and testable as written.</div>
+</div>
+<div class="msg">
+<div class="time">r1 · 02:30:19</div>
+<div class="badge">CRIT</div>
+<div class="who">antigravity → codex</div>
+<div class="body">verdict: revise
+
+No total retry budget: four attempts with full jitter can exceed 20s.
+
+blocking issues:
+- No total retry budget: four attempts with full jitter can exceed 20s.
+
+questions:
+- Is there a wall-clock cap the caller can pass?</div>
+</div>
+<div class="msg">
+<div class="time">r1 · 02:30:19</div>
+<div class="badge">ASK</div>
+<div class="who">antigravity → codex</div>
+<div class="body">Is there a wall-clock cap the caller can pass?</div>
+</div>
+<div class="msg">
+<div class="time">r1 · 02:30:19</div>
+<div class="badge">ANS</div>
+<div class="who">codex → antigravity</div>
+<div class="body">Yes: `RetryPolicy(deadline=2.0)` bounds the whole call. The budget is checked before each sleep, so the last attempt never overruns it.</div>
+</div>
+<div class="msg">
+<div class="time">r1 · 02:30:19</div>
+<div class="badge">REV</div>
+<div class="who">codex → all</div>
+<div class="body"># Plan — retries for the HTTP client
+
+1. Add `RetryPolicy(max_attempts=4, base_delay=0.2, max_delay=5)` in `http/retry.py`.
+2. Retry on `TimeoutError` and 5xx, with exponential backoff and full jitter.
+3. Do not retry non-idempotent POSTs unless the caller passes `idempotent=True`.
+4. Honour a total retry budget (wall-clock), not just attempt count.
+5. Tests: timeout, 5xx, 429 with `Retry-After`, and a budget-exhausted case.</div>
+</div>
+<div class="msg">
+<div class="time">r2 · 02:30:19</div>
+<div class="badge">PASS</div>
+<div class="who">codex → codex</div>
+<div class="body">verdict: approve
+
+Timeboxed and testable as written.</div>
+</div>
+<div class="msg">
+<div class="time">r2 · 02:30:19</div>
+<div class="badge">PASS</div>
+<div class="who">antigravity → codex</div>
+<div class="body">verdict: approve
+
+Timeboxed and testable as written.</div>
+</div>
+<div class="msg">
+<div class="time">r2 · 02:30:19</div>
+<div class="badge">TEST</div>
+<div class="who">verifier → all</div>
+<div class="body">`python3 -c &quot;print(&#x27;14 passed in 0.42s&#x27;)&quot;` exited 0 (PASS) in 0.019s</div>
+</div>
+<div class="msg">
+<div class="time">r2 · 02:30:19</div>
+<div class="badge">DONE</div>
+<div class="who">orchestrator → all</div>
+<div class="body">Unanimous approval.
+
+Approved by: codex, antigravity
+Status: verified</div>
+</div>
+<footer>Generated by Codex-Gravity · session 0b3b8963a567 · 11 messages · this is a review gate, not a merge.</footer>
+</div></body></html>

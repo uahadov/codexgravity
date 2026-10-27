@@ -1526,6 +1526,64 @@ def create_mcp_server(name: str = "codex-gravity-mcp", version: str | None = Non
             'note': None if cancelled else 'The session is not running in this process; nothing to cancel.',
         }, ensure_ascii=False)
 
+    @server.tool(name="team_report", description="Render a team session (or diff review) as one self-contained HTML file with the verdict, blockers, verification output and full transcript. Returns the written path.")
+    async def team_report(workspace_path: str, session_id: str = "", limit: int = 500) -> str:
+        from codex_gravity.team.report import latest_session, write_report
+        try:
+            target_session = session_id or latest_session(workspace_path)
+            if not target_session:
+                return json.dumps({
+                    'status': 'error',
+                    'error': 'No team sessions in this workspace yet.',
+                }, ensure_ascii=False)
+            path = write_report(workspace_path, target_session, limit=max(1, limit))
+            return json.dumps({
+                'status': 'written',
+                'session_id': target_session,
+                'path': str(path),
+                'bytes': path.stat().st_size,
+            }, ensure_ascii=False)
+        except (TeamError, OSError, ValueError) as error:
+            return json.dumps({'status': 'error', 'error': str(error)}, ensure_ascii=False)
+
+    @server.tool(name="team_compare", description="Compare two team sessions: status change, resolved/new blockers, approvals and the proposal diff. Defaults to the two most recent sessions.")
+    async def team_compare(workspace_path: str, session_id: str = "", against: str = "") -> str:
+        from codex_gravity.team.compare import compare, recent_sessions, render_text, snapshot
+        try:
+            if not session_id:
+                chosen = recent_sessions(workspace_path, 2)
+                if len(chosen) < 2:
+                    return json.dumps({
+                        'status': 'error',
+                        'error': 'Need two sessions to compare.',
+                    }, ensure_ascii=False)
+                first, second = chosen[1], chosen[0]
+            else:
+                others = [sid for sid in recent_sessions(workspace_path, 50) if sid != session_id]
+                first = session_id
+                second = against or (others[0] if others else "")
+                if not second:
+                    return json.dumps({
+                        'status': 'error',
+                        'error': 'Need a second session to compare against.',
+                    }, ensure_ascii=False)
+            result = compare(snapshot(workspace_path, first), snapshot(workspace_path, second))
+            result['summary'] = render_text(result)
+            return json.dumps(result, ensure_ascii=False)
+        except (TeamError, OSError, ValueError) as error:
+            return json.dumps({'status': 'error', 'error': str(error)}, ensure_ascii=False)
+
+    @server.tool(name="team_decisions", description="Read the project decision log (.codex-gravity/decisions.md): the accepted decisions later sessions are given as context.")
+    async def team_decisions(workspace_path: str, limit: int = 8) -> str:
+        from codex_gravity.team.memory import decisions_count, decisions_path, load_decisions
+        text = load_decisions(workspace_path, max(1, limit))
+        return json.dumps({
+            'path': str(decisions_path(workspace_path)),
+            'entries': decisions_count(workspace_path),
+            'text': text,
+            'empty': not text,
+        }, ensure_ascii=False)
+
     @server.tool(name="codex_gui_status", description="Inspect the ChatGPT/Codex desktop app: its live app-tools catalogue, the chat's busy state, turn count and last message. Read-only; requires running inside the Codex desktop app.")
     async def codex_gui_status(thread_id: str) -> str:
         try:

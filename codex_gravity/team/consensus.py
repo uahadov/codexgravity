@@ -261,24 +261,38 @@ defects (wrong logic, missing error handling, security or test gaps), not style
 preferences. If you cannot judge, use `revise` and say what evidence you need."""
 
 
-def proposal_prompt(task: str) -> str:
+def _decisions_block(decisions: str) -> str:
+    text = (decisions or "").strip()
+    if not text:
+        return ""
+    return (
+        "\nPROJECT DECISIONS ALREADY MADE (.codex-gravity/decisions.md):\n"
+        f"{text}\n"
+        "Treat these as settled context: do not re-open them unless the task explicitly\n"
+        "contradicts them, and say so if it does.\n"
+    )
+
+
+def proposal_prompt(task: str, decisions: str = "") -> str:
     return (
         "You are the planner on a two-agent engineering team (Codex + Antigravity).\n"
         "Produce a concrete, implementable proposal for the task below.\n"
         "Include: the approach, the files/functions to touch, edge cases, the test strategy,\n"
         "and the risks you expect the reviewer to attack.\n"
-        "Do not write a final patch; write the plan the team will implement and review.\n\n"
+        "Do not write a final patch; write the plan the team will implement and review.\n"
+        f"{_decisions_block(decisions)}\n"
         f"TASK:\n{task}"
     )
 
 
-def review_prompt(task: str, proposal: str, notes: str = "") -> str:
+def review_prompt(task: str, proposal: str, notes: str = "", decisions: str = "") -> str:
     extra = f"\nHUMAN/TEAM NOTES SINCE THE LAST ROUND:\n{notes}\n" if notes.strip() else ""
     return (
         "You are an independent reviewer on a two-agent engineering team.\n"
         "Be adversarial but fair: your approval is the gate, so do not approve a\n"
         "proposal that cannot be implemented and tested as written.\n"
         f"{REVIEW_CONTRACT}\n"
+        f"{_decisions_block(decisions)}"
         f"TASK:\n{task}\n\nPROPOSAL UNDER REVIEW:\n{proposal}{extra}"
     )
 
@@ -298,6 +312,7 @@ def revision_prompt(
     findings: list[ReviewFinding],
     answers: list[tuple[str, str]],
     notes: str = "",
+    decisions: str = "",
 ) -> str:
     blockers = _dedupe(issue for finding in findings if finding.blocks_consensus for issue in finding.blocking_issues)
     dissent = _dedupe(f"{f.reviewer}: {f.summary}" for f in findings if f.blocks_consensus)
@@ -315,6 +330,7 @@ def revision_prompt(
         f"REVIEWER OBJECTIONS:\n{objections}\n\n"
         f"CROSS-EXAMINATION ANSWERS:\n{answer_text}\n\n"
         f"HUMAN/TEAM NOTES:\n{note_text}"
+        f"{_decisions_block(decisions)}"
     )
 
 

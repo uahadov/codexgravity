@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codex-gravity"
-version = "0.5.0"
+version = "0.6.0"
 description = "Two-way Codex + Antigravity team harness: plan, adversarial review, cross-examination, consensus and real verification over MCP"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -58,11 +58,13 @@ codex-gravity-mcp = "codex_gravity.mcp_server:main"
 codex-gravity-team = "codex_gravity.team.cli:main"
 codex-gravity-tui = "codex_gravity.tui:main"
 codex-gravity-review = "codex_gravity.team.review_cli:main"
+codex-gravity-report = "codex_gravity.team.report:main"
+codex-gravity-compare = "codex_gravity.team.compare:main"
 
 [project.urls]
-Homepage = "https://github.com/codex-gravity/codex-gravity"
-Documentation = "https://github.com/codex-gravity/codex-gravity/blob/main/docs/TEAMWORK.md"
-Issues = "https://github.com/codex-gravity/codex-gravity/issues"
+Homepage = "https://github.com/uahadov/codexgravity"
+Documentation = "https://github.com/uahadov/codexgravity/blob/main/docs/TEAMWORK.md"
+Issues = "https://github.com/uahadov/codexgravity/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]

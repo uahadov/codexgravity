@@ -7,7 +7,7 @@
 One writes the plan. The other tries to break it. They ask each other questions, fix what
 is weak, and only then run your tests. You can read the whole conversation afterwards.
 
-[![tests](https://img.shields.io/badge/tests-247%20passing-brightgreen)](.github/workflows/tests.yml)
+[![tests](https://img.shields.io/badge/tests-284%20passing-brightgreen)](.github/workflows/tests.yml)
 [![python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-stdio%20%2B%20http-orange)](docs/TEAMWORK.md)
@@ -42,6 +42,24 @@ file for every session.
 
 That is a live terminal dashboard (nothing extra to install): who is available, what they
 are saying right now, the round counter and the final verdict with the test result.
+
+## Keep a record
+
+Every session leaves a **single HTML file** you can attach to a pull request — verdict,
+blocking issues, test output and the full conversation. No assets, no scripts, opens offline:
+
+```bash
+codex-gravity-report -w .        # → .codex-gravity/team/<session>/report.html
+codex-gravity-compare -w .       # did the proposal actually move?
+```
+
+An agreed session is also appended to `.codex-gravity/decisions.md`, so the next run
+starts with *"we already decided this"* instead of re-arguing it.
+
+<img src="docs/report-example.png" alt="Session report: VERIFIED verdict, reviewer table, exit 0 verification block and the full transcript" width="100%">
+
+*The report from the scripted demo (agents are scripted; every other part — transcript,
+consensus, real command, exit code — is the actual run).*
 
 ## Try it in 30 seconds
 
@@ -106,10 +124,13 @@ pip install -e ".[dev]"        # .[media] adds the live Gemini SDK
 # See the TUI immediately — scripted agents, no model or API key needed:
 python examples/scripted_demo.py
 
-# 1. What can actually talk right now?
+# 1. Pin the team's rules once (roles, rounds, test command, budget)
+codex-gravity-team --init -w . --test-cmd "pytest -q"
+
+# 2. What can actually talk right now?
 codex-gravity-team --check
 
-# 2. Run a real debate + verification
+# 3. Run a real debate + verification
 codex-gravity-team "Harden the upload endpoint" -w /abs/path/to/project \
   --review-with codex,antigravity --rounds 3 --test-cmd "pytest -q"
 ```
@@ -197,6 +218,31 @@ push) with both verdicts, blocking issues, dissent and the test result:
 
 Setup, inputs and cost notes: **[docs/CI.md](docs/CI.md)**.
 
+## Read, share and compare sessions
+
+| Command | What you get |
+| --- | --- |
+| `codex-gravity-report -w . [--session ID] [-o page.html]` | one self-contained HTML file: verdict, blockers, verification output, full transcript (HTML-escaped, no scripts) |
+| `codex-gravity-compare -w . [A] [B] [--json]` | status change, resolved/new blockers, approvals, proposal diff |
+| `codex-gravity-tui -w . [--follow]` | live or replayed dashboard |
+| `cat .codex-gravity/decisions.md` | what the team already decided (also handed to the agents) |
+
+`codex-gravity-report` works for diff reviews too, and the same three are MCP tools
+(`team_report`, `team_compare`, `team_decisions`).
+
+## Project policy and run budgets
+
+```bash
+codex-gravity-team --init -w . --test-cmd "pytest -q"   # → .codex-gravity/team.json (commit it)
+codex-gravity-team "…" -w . --dry-run                   # print the resolved plan, call nobody
+codex-gravity-team "…" -w . --max-calls 12 --budget-minutes 20
+```
+
+`team.json` pins roles, weights, vetoes, rounds, test command, budget and whether decisions
+are remembered. Flags override it per run; unknown keys are rejected instead of ignored.
+A budget stop ends the run as **`budget_exhausted`** — never as a verdict, and never with a
+silent half-round. `--no-remember` skips the decision log for one run.
+
 ## Inside a round
 
 ```
@@ -216,7 +262,7 @@ Setup, inputs and cost notes: **[docs/CI.md](docs/CI.md)**.
               │             real verification command ──▶ repair budget      │
               └──────────────────────────────┬───────────────────────────────┘
                                              ▼
-                    transcript.jsonl · report.md · result.json · EventBus
+                    transcript.jsonl · report.md · report.html · result.json · EventBus
 ```
 
 Every step writes a typed message (`proposal`, `critique`, `question`, `answer`,
@@ -283,6 +329,9 @@ Badges: `PLAN` `CRIT` `ASK` `ANS` `REV` `PASS` `FAIL` `TEST` `DONE` `ESC` `NOTE`
 | `team_transcript` | JSON messages or rendered Markdown. |
 | `team_send_message` | Human/agent message into a session (live or stored for audit). |
 | `team_cancel` | Stop at the next round boundary. |
+| `team_report` | Write one self-contained HTML report for a session (diff reviews too). |
+| `team_compare` | Compare two sessions: status, blockers, approvals, proposal diff. |
+| `team_decisions` | Read `.codex-gravity/decisions.md` (the context later runs receive). |
 | `codex_gui_status` | Desktop app catalogue + chat state (busy, turns, last message), read-only. |
 | `codex_gui_ask` | One message to an exact desktop chat, waits for the new reply, `unconfirmed` instead of guessing. |
 | `antigravity_gui_status` / `_start_task` / `_task_status` / `_followup` | Drive the real Antigravity desktop conversation, scoped to a workspace. |
@@ -308,6 +357,8 @@ Badges: `PLAN` `CRIT` `ASK` `ANS` `REV` `PASS` `FAIL` `TEST` `DONE` `ESC` `NOTE`
   never provider usage metadata.
 - **Heuristic code repair is opt-in** (`allow_heuristic_repair`): flipping operators to
   make a test pass is never presented as a verified fix.
+- **Budgets stop instead of lying.** Hitting `--max-calls`/`--budget-minutes` yields
+  `budget_exhausted`; the refused turns are recorded as errors, not as reviews.
 
 ## Transports
 

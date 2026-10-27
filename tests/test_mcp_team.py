@@ -94,3 +94,43 @@ async def test_mcp_team_agents_reports_transports():
     assert "codex" in data
     assert "antigravity" in data
     assert set(data["codex"]) == {"name", "transport_available", "reason"}
+
+
+@pytest.mark.asyncio
+async def test_mcp_team_report_compare_and_decisions(tmp_path):
+    server = create_mcp_server()
+    sessions = []
+    for issue in ("Missing retry limit", "Missing retry limit, no test"):
+        agents = {
+            "codex": ScriptedAgent("codex", [PLAN, approve("Agreed.")]),
+            "antigravity": ScriptedAgent("antigravity", [approve(issue)]),
+        }
+        with patch("codex_gravity.mcp_server.default_agents", return_value=agents):
+            res = await server.call_tool("team_run_task", {
+                "prompt": "Add idempotency keys to the payment API",
+                "workspace_path": str(tmp_path),
+                "review_with": "codex,antigravity",
+            })
+        sessions.append(_payload(res)["session_id"])
+
+    report = _payload(await server.call_tool("team_report", {
+        "workspace_path": str(tmp_path), "session_id": sessions[0],
+    }))
+    assert report["status"] == "written"
+    assert report["bytes"] > 500
+
+    diff = _payload(await server.call_tool("team_compare", {
+        "workspace_path": str(tmp_path),
+        "session_id": sessions[0], "against": sessions[1],
+    }))
+    assert diff["before"]["session_id"] == sessions[0]
+    assert diff["after"]["session_id"] == sessions[1]
+    assert "status" in diff["summary"]
+
+    decisions = _payload(await server.call_tool("team_decisions", {
+        "workspace_path": str(tmp_path),
+    }))
+    assert decisions["entries"] >= 2
+    assert decisions["empty"] is False
+    assert "idempotency" in decisions["text"]
+

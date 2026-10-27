@@ -5,7 +5,7 @@ Plan → adversarial review → cross-examination → revision → consensus →
 verification, with every message persisted in an auditable transcript.
 """
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 from codex_gravity.sandbox import SandboxManager, LockState, StateLock
 from codex_gravity.event_bus import EventBus, Event, EventType
