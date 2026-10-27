@@ -69,9 +69,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--session-id", default=None, help="Reuse an explicit 12-hex session id")
     parser.add_argument(
         "--ui",
-        choices=["auto", "ansi", "plain"],
+        choices=["auto", "gui", "curses", "ansi", "plain"],
         default="auto",
-        help="Live view: auto (colors on a terminal, plain when piped), ansi, or plain",
+        help=(
+            "auto/gui → full-screen dashboard on a terminal (btop-style panels); "
+            "ansi/plain → streaming lines (piped/CI)"
+        ),
     )
     parser.add_argument("--json", action="store_true", help="Print the full result as JSON")
     parser.add_argument("--check", action="store_true", help="Only report transport availability")
@@ -170,15 +173,18 @@ async def _run(args: argparse.Namespace) -> int:
     try:
         result = await orchestrator.run(config, agents=agents)
     except TeamError as error:
+        ui.stop_animation()
         print(f"Team error: {error}", file=sys.stderr)
         return 2
-    finally:
-        ui.stop_animation()
 
     if args.json:
+        ui.stop_animation()
         print(result.model_dump_json(indent=2))
     else:
         ui.summary(result)
+        # The full-screen dashboard stays up until q/Esc; streaming UIs return at once.
+        await ui.wait_close()
+        ui.stop_animation()
         _print_detail(result)
     return 0 if result.status in ("consensus", "verified") else 1
 

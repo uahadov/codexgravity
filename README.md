@@ -79,8 +79,11 @@ best. Codex-Gravity treats the pair as a **review culture**:
 ## Quickstart
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate   # fish: source .venv/bin/activate.fish
 pip install -e ".[dev]"        # .[media] adds the live Gemini SDK
+
+# See the TUI immediately — scripted agents, no model or API key needed:
+python examples/scripted_demo.py
 
 # 1. What can actually talk right now?
 codex-gravity-team --check
@@ -169,41 +172,41 @@ Every step writes a typed message (`proposal`, `critique`, `question`, `answer`,
 sender, recipient, round and correlation id. Details:
 **[docs/TEAMWORK.md](docs/TEAMWORK.md)**.
 
-## Watch it live (TUI)
+## Watch it live — full-screen dashboard
 
-Every run streams what the agents say to each other — colors and badges on a
-terminal, clean lines when piped (CI, servers, `docker logs`). No third-party
-dependency, and `--ui plain|ansi|auto` overrides detection.
+On a terminal the run opens a **btop-style dashboard** (curses, no dependencies) that
+redraws 10×/s: agent panel with reachability, live transcript with badges, round
+separators, a message sparkline, the consensus panel and real verification results.
 
 ```text
-┌ Codex · Gravity — team session ──────────────────────────────────────────────
-│ task      Add retry handling to the HTTP client
-│ workspace /srv/project
-│ session   9f3c1ae0b7d2
-│ agents    antigravity ✓ · codex-cli ✓ · codex-gui ✗
-└──────────────────────────────────────────────────────────────────────────────
-02:43:55  TASK  orchestrator → all    Add retry handling to the HTTP client
-02:43:55  PLAN  codex → all           # Plan v1 · retry wrapper, no budget test
-── round 1 ───────────────────────────────────────────────────────────────────
-02:43:55  CRIT  codex → antigravity   verdict: revise
-          blocking issues: - No retry-budget test.
-          questions: - Which backoff?
-02:43:55  ASK   codex → antigravity   Which backoff?
-02:43:55  ANS   antigravity → codex   Exponential with jitter.
-02:43:55  REV   antigravity → all     # Plan v2 · exponential + jitter + budget test
-── round 2 ───────────────────────────────────────────────────────────────────
-02:43:55  PASS  codex → antigravity   verdict: approve
-02:43:55  TEST  verifier → all        `pytest -q` exited 0 (PASS) in 4.31s
-02:43:55  DONE  orchestrator → all    Unanimous approval.
-┌ VERIFIED ────────────────────────────────────────────────────────────────────
-│ decision     Unanimous approval.
-│ approved by  codex
-│ verification PASS  `pytest -q` exit 0 in 4.31s
-│ rounds       2 · messages 9 · 12.4s
-└──────────────────────────────────────────────────────────────────────────────
+┌ Codex · Gravity — team session ────────────── session 9f3c1ae0b7d2 · 01:14 ┐
+│  task  Add retry handling to the HTTP client                              │
+├─ AGENTS ────────────────────┬─ TRANSCRIPT ───────────────────────────────┤
+│ ✓ antigravity          3    │ 15:37:09  CRIT antigravity → codex-cli     │
+│ ✓ antigravity-cli      0    │     verdict: revise                        │
+│ ✗ codex                0    │     blocking: no retry-budget test         │
+│    Codex CLI is unavailable │ 15:37:09  ASK  antigravity → codex-cli     │
+│ ✗ codex-gui            0    │     Which backoff strategy?                │
+│    no Codex chat id: pass…  │ 15:37:09  ANS  codex-cli → antigravity      │
+│                             │     Exponential with full jitter.          │
+│─ STATUS ────────────────────│ 15:37:09  REV  codex-cli → all             │
+│ round 2 · msgs 11           │     # Plan v2                              │
+│ activity ▄█▆                │ ── round 2 ─────────────────────────────── │
+│ last  verified              │ 15:37:09  PASS antigravity → codex-cli     │
+│─ CONSENSUS ─────────────────│ 15:37:09  TEST verifier → all              │
+│ VERIFIED                    │     `pytest -q` exited 0 (PASS) in 4.31s   │
+│ approved  antigravity, codex│ 15:37:09  DONE orchestrator → all          │
+│ tests     PASS exit 0       │     Unanimous approval. Status: verified   │
+├─────────────────────────────┴────────────────────────────────────────────┤
+│  q quit · ↑↓ scroll · f follow · ? help · verified ⠋   /srv/project       │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
-Badges: `PLAN` `CRIT` `ASK` `ANS` `REV` `PASS` `FAIL` `TEST` `DONE` `ESC` `NOTE`.
+Keys: `q`/`Esc` quit · `↑`/`↓`/`PgUp`/`PgDn` scroll · `Home`/`End` jump · `f` follow ·
+`r` reset · `?` help. Piped output (CI, `docker logs`) automatically switches to plain
+lines; `--ui ansi` keeps colours, `--ui plain` forces text, `--ui gui` forces the
+dashboard. Terminals smaller than 76×18 show an explicit hint instead.
+
 Replay or follow any session later (works from a server, no team process needed):
 
 ```bash
@@ -211,6 +214,11 @@ codex-gravity-tui --workspace /srv/project                      # latest session
 codex-gravity-tui -w /srv/project --session 9f3c1ae0b7d2        # a specific one
 codex-gravity-tui -w /srv/project --follow                      # tail until DONE/ESC
 ```
+
+No model yet? `python examples/scripted_demo.py` runs the whole thing with scripted
+agents so you can try the dashboard immediately.
+
+Badges: `PLAN` `CRIT` `ASK` `ANS` `REV` `PASS` `FAIL` `TEST` `DONE` `ESC` `NOTE`.
 
 ## MCP tools
 

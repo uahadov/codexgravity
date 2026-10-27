@@ -59,6 +59,19 @@ def test_auto_mode_is_plain_without_a_tty():
     assert isinstance(make_ui("auto", io.StringIO()), PlainUi)
 
 
+class _BrokenStream(io.StringIO):
+    def write(self, _text):  # noqa: D401 - simulate a closed pipe
+        raise BrokenPipeError()
+
+
+def test_pipe_closed_exits_quietly():
+    ui = make_ui("plain", _BrokenStream())
+    with pytest.raises(SystemExit):
+        ui.write("line")
+    with pytest.raises(SystemExit):
+        ui.status("spinner")
+
+
 def test_ansi_mode_forces_colors():
     ui = make_ui("ansi", io.StringIO())
     assert isinstance(ui, AnsiUi)
@@ -93,12 +106,13 @@ async def test_ui_renders_a_real_session_and_replay(tmp_path):
     assert "transcript" in out
 
     # Replay from disk through the standalone viewer entry point.
-    import sys
-
     from codex_gravity import tui
-    argv = sys.argv
-    sys.argv = ["codex-gravity-tui", "--workspace", str(tmp_path), "--session", result.session_id, "--ui", "plain"]
-    try:
-        tui.main()
-    finally:
-        sys.argv = argv
+
+    args = type("Args", (), {
+        "workspace": str(tmp_path),
+        "session": result.session_id,
+        "follow": False,
+        "timeout": 1.0,
+        "ui": "plain",
+    })()
+    assert await tui._replay(args) == 0

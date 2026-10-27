@@ -195,6 +195,10 @@ class BaseUi:
         """No-op hook; interactive UIs override this."""
         return None
 
+    async def wait_close(self, timeout: Optional[float] = None) -> None:
+        """No-op hook; full-screen UIs keep the result visible until a key."""
+        return None
+
     def summary(self, result: TeamResult) -> None:
         color = STATUS_COLORS.get(result.status, COLOR_GREY)
         line = "─" * self.width()
@@ -218,14 +222,36 @@ class BaseUi:
         self.write("└" + line[: self.width()])
 
 
+def _quit_on_broken_pipe(stream: Optional[TextIO] = None) -> None:
+    """
+    Exit quietly when the reader goes away (e.g. ``codex-gravity-tui | head``).
+
+    The real stdout is closed so the interpreter's final flush cannot print a
+    second traceback. A custom stream (pytest capture, another UI's sink) is
+    never touched.
+    """
+    if stream is None or stream is sys.stdout:
+        try:
+            sys.stdout.close()
+        except (OSError, ValueError):
+            pass
+    raise SystemExit(0)
+
+
 class PlainUi(BaseUi):
     """Piped/CI output: no escape codes, one line per message."""
 
     def write(self, text: str) -> None:
-        print(text, file=self.stream, flush=True)
+        try:
+            print(text, file=self.stream, flush=True)
+        except BrokenPipeError:
+            _quit_on_broken_pipe(self.stream)
 
     def status(self, text: str) -> None:
-        print(f"[{text}]", file=self.stream, flush=True)
+        try:
+            print(f"[{text}]", file=self.stream, flush=True)
+        except BrokenPipeError:
+            _quit_on_broken_pipe(self.stream)
 
     def clear_status(self) -> None:
         return None
@@ -248,18 +274,27 @@ class AnsiUi(BaseUi):
         if self._status_visible:
             self.stream.write(CLEAR_LINE)
             self._status_visible = False
-        self.stream.write(text + "\n")
-        self.stream.flush()
+        try:
+            self.stream.write(text + "\n")
+            self.stream.flush()
+        except BrokenPipeError:
+            _quit_on_broken_pipe(self.stream)
 
     def status(self, text: str) -> None:
-        self.stream.write(f"{CLEAR_LINE}{self.paint(text, DIM)}")
-        self.stream.flush()
+        try:
+            self.stream.write(f"{CLEAR_LINE}{self.paint(text, DIM)}")
+            self.stream.flush()
+        except BrokenPipeError:
+            _quit_on_broken_pipe(self.stream)
         self._status_visible = True
 
     def clear_status(self) -> None:
         if self._status_visible:
-            self.stream.write(CLEAR_LINE)
-            self.stream.flush()
+            try:
+                self.stream.write(CLEAR_LINE)
+                self.stream.flush()
+            except BrokenPipeError:
+                _quit_on_broken_pipe(self.stream)
             self._status_visible = False
 
     async def animate(self, label: str = "waiting for the next turn") -> None:
@@ -284,14 +319,27 @@ class AnsiUi(BaseUi):
 
 
 def make_ui(mode: str = "auto", stream: Optional[TextIO] = None) -> BaseUi:
-    """``auto`` → AnsiUi on a terminal, PlainUi otherwise."""
+    """
+    ``auto`` → full-screen dashboard on a real terminal, plain when piped.
+
+    ``gui``/``curses`` request the btop-style dashboard explicitly and fall back
+    to plain output when the stream is not a terminal.
+    """
     stream = stream or sys.stdout
+    is_tty = bool(getattr(stream, "isatty", lambda: False)())
     if mode == "plain":
         return PlainUi(stream)
     if mode == "ansi":
         # Explicitly requested: keep colors even when the output is piped.
         return AnsiUi(stream, force_color=True)
-    is_tty = bool(getattr(stream, "isatty", lambda: False)())
+    if mode in ("gui", "curses"):
+        if not is_tty:
+            return PlainUi(stream)
+        from codex_gravity.tui_screen import CursesDashboard
+        return CursesDashboard(stream)
+    if is_tty and os.environ.get("TERM", "xterm") not in ("", "dumb"):
+        from codex_gravity.tui_screen import CursesDashboard
+        return CursesDashboard(stream)
     return AnsiUi(stream) if is_tty else PlainUi(stream)
 
 
@@ -337,23 +385,12 @@ async def follow(workspace: Path, session_id: str, ui: BaseUi, timeout: float = 
         ui.summary(result)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        prog="codex-gravity-tui",
-        description="Watch (or replay) a Codex-Gravity team session.",
-    )
-    parser.add_argument("-w", "--workspace", default=".", help="Project directory")
-    parser.add_argument("--session", default=None, help="12-hex session id (default: the latest)")
-    parser.add_argument("--follow", action="store_true", help="Keep tailing until consensus/escalation")
-    parser.add_argument("--timeout", type=float, default=3600, help="Follow timeout in seconds")
-    parser.add_argument("--ui", choices=["auto", "ansi", "plain"], default="auto", help="Rendering mode")
-    args = parser.parse_args()
-
+async def _replay(args: argparse.Namespace) -> int:
     workspace = Path(args.workspace).expanduser().resolve()
     session_id = args.session or latest_session(workspace)
     if not session_id:
         print(f"No team sessions under {workspace}/.codex-gravity/team", file=sys.stderr)
-        raise SystemExit(2)
+        return 2
 
     ui = make_ui(args.ui)
     transcript = TeamTranscript(workspace, session_id)
@@ -363,15 +400,39 @@ def main() -> None:
         session=session_id,
         agents={},
     )
-    if args.follow:
-        asyncio.run(follow(workspace, session_id, ui, args.timeout))
-        return
-    ui.render_transcript(transcript.messages())
-    result = _load_result(workspace, session_id)
-    if result is not None:
-        ui.summary(result)
-    else:
-        print("\n(no result.json yet — the session may still be running; use --follow)", file=ui.stream)
+    ui.start_animation("replaying session")
+    try:
+        if args.follow:
+            await follow(workspace, session_id, ui, args.timeout)
+        else:
+            ui.render_transcript(transcript.messages())
+            result = _load_result(workspace, session_id)
+            if result is not None:
+                ui.summary(result)
+            else:
+                ui.status("no result.json yet — rerun with --follow")
+        await ui.wait_close()
+    finally:
+        ui.stop_animation()
+    return 0
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="codex-gravity-tui",
+        description="Watch (or replay) a Codex-Gravity team session.",
+    )
+    parser.add_argument("-w", "--workspace", default=".", help="Project directory")
+    parser.add_argument("--session", default=None, help="12-hex session id (default: the latest)")
+    parser.add_argument("--follow", action="store_true", help="Keep tailing until consensus/escalation")
+    parser.add_argument("--timeout", type=float, default=3600, help="Follow timeout in seconds")
+    parser.add_argument(
+        "--ui",
+        choices=["auto", "gui", "curses", "ansi", "plain"],
+        default="auto",
+        help="auto/gui → full-screen dashboard on a terminal; ansi/plain → streaming lines",
+    )
+    raise SystemExit(asyncio.run(_replay(parser.parse_args())))
 
 
 if __name__ == "__main__":

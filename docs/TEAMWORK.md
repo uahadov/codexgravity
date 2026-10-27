@@ -195,23 +195,55 @@ Guarantees and limits:
 Exit codes: `0` consensus/verified, `1` deadlocked/failed/unavailable/cancelled, `2`
 usage or team error.
 
-## 7b. Live view (TUI)
+## 7b. Live dashboard (TUI)
 
-`codex_gravity/tui.py` renders the session while it runs. It subscribes to the shared
-EventBus (the same events the dashboard sees) and prints one block per message:
+`codex_gravity/tui_screen.py` renders a **btop-style full-screen dashboard** on a
+terminal. It subscribes to the same EventBus events as the web dashboard and redraws
+~10×/s; the layout is a pure function (`render(state, width, height)`) so it is unit
+tested without a terminal.
 
+```text
+┌ Codex · Gravity — team session ────────────── session 9f3c1ae0b7d2 · 01:14 ┐
+│  task  Add retry handling to the HTTP client                              │
+├─ AGENTS ────────────────────┬─ TRANSCRIPT ───────────────────────────────┤
+│ ✓ antigravity          3    │ 15:37:09  CRIT antigravity → codex-cli     │
+│ ✗ codex                0    │     verdict: revise                        │
+│    Codex CLI is unavailable │ 15:37:09  ASK  antigravity → codex-cli     │
+│─ STATUS ────────────────────│ ── round 2 ─────────────────────────────── │
+│ round 2 · msgs 11           │ 15:37:09  PASS antigravity → codex-cli     │
+│ activity ▄█▆                │ 15:37:09  TEST verifier → all              │
+│ last  verified              │ 15:37:09  DONE orchestrator → all          │
+│─ CONSENSUS ─────────────────│                                            │
+│ VERIFIED · tests PASS exit 0│                                            │
+├─────────────────────────────┴────────────────────────────────────────────┤
+│  q quit · ↑↓ scroll · f follow · ? help · verified ⠋   /srv/project       │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
-02:43:55  CRIT  codex → antigravity   verdict: revise
-          blocking issues: - No retry-budget test.
-          questions: - Which backoff?
-```
 
-- **Badges** map message kinds (`PLAN`, `CRIT`, `ASK`, `ANS`, `REV`, `PASS`, `FAIL`,
-  `TEST`, `DONE`, `ESC`, `NOTE`, `TASK`).
-- **Round separators** appear when the round number changes.
-- **A keep-alive spinner** runs on the last line while agents think (TTY only).
-- **Piped output** (CI, `docker logs`, `tee`) automatically drops colors and the spinner.
-- `--ui ansi` forces colors even when piped; `NO_COLOR` disables them.
+Panels:
+
+| Panel | Shows |
+| --- | --- |
+| header | task, session id, elapsed time |
+| AGENTS | every transport with ✓/✗, its reason when unavailable, and how many messages it sent |
+| STATUS | round, message count, per-round activity sparkline, last event |
+| CONSENSUS | status, approving agents, verification exit code, rounds/messages |
+| TRANSCRIPT | badge + sender → recipient + wrapped body, `── round N ──` separators |
+| footer | keys, spinner, workspace path |
+
+Keys: `q`/`Esc` quit · `↑`/`↓` (and `k`/`j`) scroll · `PgUp`/`PgDn` page · `Home`/`End`
+jump · `f` follow · `r` reset · `?` help overlay.
+
+Behaviour:
+
+- **Automatic fallback.** Piped output (CI, `docker logs`, `tee`) uses plain lines;
+  `--ui ansi` keeps colours, `--ui plain` forces text, `--ui gui` forces the dashboard.
+- **Small terminals** (< 76×18) show an explicit "terminal too small" hint instead of a
+  broken layout.
+- **The final screen stays** after consensus until you press `q`/`Esc`, then the proposal
+  and file paths are printed normally.
+- **No dependencies**: curses only. If the terminal cannot start curses, the run falls
+  back to plain output and says so.
 
 Replay and follow need no running team — they read the on-disk transcript:
 
@@ -221,8 +253,8 @@ codex-gravity-tui -w /srv/project --session 9f3c1ae0b7d2     # specific session
 codex-gravity-tui -w /srv/project --follow --timeout 1800    # tail until DONE/ESC
 ```
 
-`--follow` prints new messages every 0.5 s and exits on `consensus`/`escalation`, so a
-server operator can watch a run from another shell.
+`python examples/scripted_demo.py` runs a complete session with scripted agents so the
+dashboard can be tried without a model, API key or desktop app.
 
 ## 8. MCP tools
 
